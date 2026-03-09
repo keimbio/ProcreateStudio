@@ -1,0 +1,2368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Procreate Studio — Viewer & Converter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-deep: #0a0a0c;
+  --bg-surface: #141418;
+  --bg-elevated: #1c1c22;
+  --bg-hover: #24242c;
+  --border: #2a2a34;
+  --border-light: #3a3a48;
+  --text-primary: #e8e6f0;
+  --text-secondary: #9896a8;
+  --text-muted: #6a6878;
+  --accent: #e07848;
+  --accent-hover: #f08858;
+  --accent-glow: rgba(224, 120, 72, 0.15);
+  --success: #58c878;
+  --warning: #e8b848;
+  --error: #e85858;
+  --blue: #5888e8;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-lg: 14px;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
+  --font: 'DM Sans', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  --mono: 'JetBrains Mono', 'SF Mono', monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { 
+  height: 100%; 
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  background: var(--bg-deep);
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+/* SCROLLBAR */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-light); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* APP LAYOUT */
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100vh;
+  width: 100vw;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  z-index: 100;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: -0.02em;
+}
+
+.logo-icon {
+  width: 32px; height: 32px;
+  background: linear-gradient(135deg, var(--accent), #c85830);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  box-shadow: 0 2px 8px rgba(224, 120, 72, 0.3);
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.file-info {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  padding: 4px 10px;
+  background: var(--bg-elevated);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  max-width: 300px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* MAIN WORKSPACE */
+.workspace {
+  display: grid;
+  grid-template-columns: 280px 1fr 300px;
+  overflow: hidden;
+}
+
+.workspace.no-file {
+  grid-template-columns: 1fr;
+}
+
+/* PANELS */
+.panel {
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.panel:last-child {
+  border-right: none;
+  border-left: 1px solid var(--border);
+}
+
+.panel-header {
+  padding: 14px 16px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+/* LAYER LIST */
+.layer-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+  border: 1px solid transparent;
+  margin-bottom: 2px;
+}
+
+.layer-item:hover { background: var(--bg-hover); }
+.layer-item.selected { background: var(--accent-glow); border-color: var(--accent); }
+.layer-item.hidden-layer { opacity: 0.4; }
+
+.layer-thumb {
+  width: 40px; height: 40px;
+  border-radius: var(--radius-sm);
+  background: repeating-conic-gradient(#333 0% 25%, #222 0% 50%) 50% / 10px 10px;
+  overflow: hidden;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+}
+
+.layer-thumb canvas {
+  width: 100%; height: 100%;
+  object-fit: contain;
+}
+
+.layer-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.layer-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.layer-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.layer-vis {
+  width: 28px; height: 28px;
+  border: none; background: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.layer-vis:hover { background: var(--bg-hover); color: var(--text-primary); }
+.layer-vis.off { color: var(--text-muted); opacity: 0.4; }
+
+.layer-check {
+  width: 18px; height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* CANVAS AREA */
+.canvas-area {
+  background: var(--bg-deep);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.canvas-viewport {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: 
+    radial-gradient(circle at 50% 50%, rgba(30,30,40,1) 0%, var(--bg-deep) 100%);
+  padding: 24px;
+}
+
+.canvas-container {
+  position: relative;
+  box-shadow: var(--shadow), 0 0 60px rgba(0,0,0,0.3);
+  border-radius: 4px;
+  overflow: hidden;
+  background: repeating-conic-gradient(#2a2a2a 0% 25%, #222 0% 50%) 50% / 16px 16px;
+}
+
+#mainCanvas {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 180px);
+  object-fit: contain;
+}
+
+/* BUTTONS */
+.btn {
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.btn:hover { background: var(--bg-hover); border-color: var(--border-light); }
+.btn.active { background: var(--accent-glow); border-color: var(--accent); color: var(--accent); }
+
+.btn-accent {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+.btn-accent:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+.btn-sm { padding: 4px 10px; font-size: 11px; }
+.btn-icon { padding: 6px 8px; }
+
+.btn-group {
+  display: flex;
+  gap: 0;
+}
+.btn-group .btn {
+  border-radius: 0;
+  margin-left: -1px;
+}
+.btn-group .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); margin-left: 0; }
+.btn-group .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
+
+/* SEPARATOR */
+.sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+/* UPLOAD SCREEN */
+.upload-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 40px;
+}
+
+.upload-zone {
+  width: 100%;
+  max-width: 560px;
+  padding: 64px 40px;
+  border: 2px dashed var(--border-light);
+  border-radius: var(--radius-lg);
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.25s;
+  background: var(--bg-surface);
+  position: relative;
+}
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 40px rgba(224, 120, 72, 0.1);
+}
+
+.upload-icon {
+  font-size: 56px;
+  margin-bottom: 20px;
+  display: block;
+  opacity: 0.8;
+}
+
+.upload-title {
+  font-size: 22px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  letter-spacing: -0.02em;
+}
+
+.upload-hint {
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+.upload-formats {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.format-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 3px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text-muted);
+}
+
+/* RIGHT PANEL - EXPORT & PALETTE */
+.export-section {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.format-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.format-option {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all 0.15s;
+  text-align: center;
+  background: var(--bg-elevated);
+}
+.format-option:hover { border-color: var(--border-light); background: var(--bg-hover); }
+.format-option.selected { border-color: var(--accent); background: var(--accent-glow); }
+
+.format-option .fmt-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.format-option .fmt-desc {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.export-mode {
+  margin-top: 10px;
+}
+
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.radio-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 13px;
+}
+.radio-item:hover { background: var(--bg-hover); }
+.radio-item input { accent-color: var(--accent); }
+
+.range-input {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+.range-input input {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 4px 8px;
+  border-radius: 4px;
+  width: 80px;
+}
+
+.range-input label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* COLOR PALETTE */
+.palette-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.palette-swatch {
+  aspect-ratio: 1;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: transform 0.15s;
+  border: 2px solid transparent;
+  position: relative;
+}
+.palette-swatch:hover { 
+  transform: scale(1.1); 
+  z-index: 1;
+  border-color: var(--text-primary);
+}
+
+.palette-swatch .tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-deep);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  z-index: 10;
+}
+.palette-swatch:hover .tooltip { display: block; }
+
+/* PROGRESS */
+.progress-bar {
+  height: 3px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  overflow: hidden;
+  margin: 8px 0;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.3s;
+  width: 0%;
+}
+
+/* STATUS */
+.status-bar {
+  padding: 6px 16px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  flex-shrink: 0;
+}
+
+/* LOADING OVERLAY */
+.loading-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(10,10,12,0.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+  backdrop-filter: blur(4px);
+}
+
+.spinner {
+  width: 40px; height: 40px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-bottom: 16px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.loading-text {
+  font-size: 14px;
+  color: var(--text-secondary);
+}
+
+/* TOAST */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 10px 20px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  z-index: 1000;
+  box-shadow: var(--shadow);
+  transition: transform 0.3s ease;
+  pointer-events: none;
+}
+.toast.show { transform: translateX(-50%) translateY(0); }
+
+/* QUALITY SLIDER */
+.quality-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+.quality-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+  height: 4px;
+}
+.quality-row span {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-width: 30px;
+  text-align: right;
+}
+
+/* RESPONSIVE */
+@media (max-width: 1024px) {
+  .workspace { grid-template-columns: 1fr; }
+  .panel { display: none; }
+  .canvas-area { grid-column: 1; }
+}
+
+/* ANIMATIONS */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.fade-in { animation: fadeIn 0.3s ease; }
+
+/* SELECT ALL / DESELECT */
+.layer-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* HIDDEN */
+.hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <header class="header">
+    <div class="logo">
+      <div class="logo-icon">◆</div>
+      <span>Procreate Studio</span>
+    </div>
+    <div class="header-actions">
+      <span id="fileInfo" class="file-info hidden"></span>
+      <button id="btnNewFile" class="btn hidden" onclick="resetApp()">New File</button>
+    </div>
+  </header>
+
+  <div id="workspace" class="workspace no-file">
+    <!-- UPLOAD SCREEN -->
+    <div id="uploadScreen" class="upload-screen">
+      <div id="uploadZone" class="upload-zone">
+        <span class="upload-icon">🎨</span>
+        <div class="upload-title">Open Procreate File</div>
+        <div class="upload-hint">Drag & drop a .procreate file or click to browse</div>
+        <div class="upload-formats">
+          <span class="format-tag">.procreate</span>
+        </div>
+        <input type="file" id="fileInput" accept=".procreate" style="display:none">
+      </div>
+    </div>
+
+    <!-- LEFT PANEL: LAYERS -->
+    <div id="layerPanel" class="panel hidden">
+      <div class="panel-header">
+        <span>Layers</span>
+        <div class="layer-actions">
+          <button class="btn btn-sm" onclick="selectAllLayers()">All</button>
+          <button class="btn btn-sm" onclick="deselectAllLayers()">None</button>
+        </div>
+      </div>
+      <div id="layerList" class="panel-body"></div>
+    </div>
+
+    <!-- CENTER: CANVAS -->
+    <div id="canvasArea" class="canvas-area hidden">
+      <div class="canvas-toolbar">
+        <div class="btn-group">
+          <button class="btn btn-sm active" data-view="composite" onclick="setView('composite')">Composite</button>
+          <button class="btn btn-sm" data-view="selected" onclick="setView('selected')">Selected</button>
+          <button class="btn btn-sm" data-view="single" onclick="setView('single')">Single Layer</button>
+        </div>
+        <div class="sep"></div>
+        <button class="btn btn-sm btn-icon" onclick="zoomCanvas(-1)" title="Zoom Out">−</button>
+        <span id="zoomLevel" style="font-size:11px;font-family:var(--mono);color:var(--text-secondary);min-width:40px;text-align:center">100%</span>
+        <button class="btn btn-sm btn-icon" onclick="zoomCanvas(1)" title="Zoom In">+</button>
+        <button class="btn btn-sm" onclick="zoomCanvas(0)" title="Fit">Fit</button>
+        <div class="sep"></div>
+        <label style="font-size:11px;color:var(--text-secondary);display:flex;align-items:center;gap:6px;cursor:pointer">
+          <input type="checkbox" id="showTransparency" checked onchange="renderView()" style="accent-color:var(--accent)">
+          Transparency grid
+        </label>
+      </div>
+      <div class="canvas-viewport" id="canvasViewport">
+        <div class="canvas-container" id="canvasContainer">
+          <canvas id="mainCanvas"></canvas>
+        </div>
+      </div>
+      <div class="status-bar">
+        <span id="statusLeft">Ready</span>
+        <span id="statusRight"></span>
+      </div>
+      <div id="loadingOverlay" class="loading-overlay hidden">
+        <div class="spinner"></div>
+        <div class="loading-text" id="loadingText">Loading...</div>
+        <div class="progress-bar" style="width:200px;margin-top:12px">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- RIGHT PANEL: EXPORT & PALETTE -->
+    <div id="rightPanel" class="panel hidden">
+      <div class="panel-header"><span>Export & Colors</span></div>
+      <div class="panel-body" style="padding:0">
+
+        <!-- EXPORT FORMAT -->
+        <div class="export-section">
+          <div class="section-title">Export Format</div>
+          <div class="format-grid">
+            <div class="format-option selected" data-format="png" onclick="selectFormat('png')">
+              <div class="fmt-name">PNG</div>
+              <div class="fmt-desc">Lossless, transparency</div>
+            </div>
+            <div class="format-option" data-format="jpg" onclick="selectFormat('jpg')">
+              <div class="fmt-name">JPG</div>
+              <div class="fmt-desc">Compressed, smaller</div>
+            </div>
+            <div class="format-option" data-format="tiff" onclick="selectFormat('tiff')">
+              <div class="fmt-name">TIFF</div>
+              <div class="fmt-desc">Uncompressed, print</div>
+            </div>
+            <div class="format-option" data-format="webp" onclick="selectFormat('webp')">
+              <div class="fmt-name">WebP</div>
+              <div class="fmt-desc">Modern, efficient</div>
+            </div>
+          </div>
+
+          <div id="qualityControl" class="quality-row hidden">
+            <label style="font-size:12px;color:var(--text-secondary)">Quality</label>
+            <input type="range" id="qualitySlider" min="1" max="100" value="92">
+            <span id="qualityValue">92%</span>
+          </div>
+        </div>
+
+        <!-- EXPORT MODE -->
+        <div class="export-section">
+          <div class="section-title">Export Mode</div>
+          <div class="radio-group">
+            <label class="radio-item">
+              <input type="radio" name="exportMode" value="composite" checked>
+              Composite (all visible layers)
+            </label>
+            <label class="radio-item">
+              <input type="radio" name="exportMode" value="selected">
+              Selected layers merged
+            </label>
+            <label class="radio-item">
+              <input type="radio" name="exportMode" value="individual">
+              Each layer individually (bulk)
+            </label>
+            <label class="radio-item">
+              <input type="radio" name="exportMode" value="range">
+              Layer range
+            </label>
+          </div>
+          <div id="rangeControl" class="range-input hidden">
+            <label>Range:</label>
+            <input type="text" id="layerRange" placeholder="e.g. 1-5, 7, 9-10">
+          </div>
+          <button class="btn btn-accent" style="width:100%;margin-top:12px;justify-content:center" onclick="exportLayers()">
+            Export
+          </button>
+        </div>
+
+        <!-- COLOR PALETTE -->
+        <div class="export-section">
+          <div class="section-title">Color Palette</div>
+          <div id="paletteArea">
+            <div style="font-size:12px;color:var(--text-muted);padding:8px 0">
+              Load a file to extract colors
+            </div>
+          </div>
+          <div id="paletteActions" class="hidden" style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-sm" onclick="exportPalette('ase')">Export .ASE</button>
+            <button class="btn btn-sm" onclick="exportPalette('swatches')">Export .swatches</button>
+            <button class="btn btn-sm" onclick="exportPalette('act')">Export .ACT</button>
+            <button class="btn btn-sm" onclick="regeneratePalette()">Regenerate</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// ========================================================================
+// PROCREATE STUDIO — Complete .procreate File Parser & Viewer
+// ========================================================================
+
+// --- STATE ---
+let procFile = null;  // parsed procreate file data
+let layers = [];      // array of { name, uuid, opacity, blend, hidden, visible, selected, canvas }
+let currentView = 'composite';
+let selectedFormat = 'png';
+let zoomFactor = 1;
+let palette = [];
+let canvasWidth = 0, canvasHeight = 0, tileSize = 256;
+
+// --- BINARY PLIST PARSER ---
+class BPlistParser {
+  constructor(buffer) {
+    this.buffer = buffer;
+    this.view = new DataView(buffer);
+    this.bytes = new Uint8Array(buffer);
+  }
+
+  parse() {
+    const magic = String.fromCharCode(...this.bytes.slice(0, 8));
+    if (!magic.startsWith('bplist')) throw new Error('Not a binary plist');
+    
+    const trailerStart = this.buffer.byteLength - 32;
+    // skip 6 unused bytes
+    this.offsetSize = this.view.getUint8(trailerStart + 6);
+    this.objectRefSize = this.view.getUint8(trailerStart + 7);
+    this.numObjects = Number(this.view.getBigUint64(trailerStart + 8));
+    this.topObjectIndex = Number(this.view.getBigUint64(trailerStart + 16));
+    this.offsetTableOffset = Number(this.view.getBigUint64(trailerStart + 24));
+    
+    this.offsets = [];
+    for (let i = 0; i < this.numObjects; i++) {
+      this.offsets.push(this.readSizedInt(
+        this.offsetTableOffset + i * this.offsetSize, 
+        this.offsetSize
+      ));
+    }
+    
+    return this.parseObject(this.topObjectIndex);
+  }
+
+  readSizedInt(offset, size) {
+    let val = 0;
+    for (let i = 0; i < size; i++) {
+      val = val * 256 + this.bytes[offset + i];
+    }
+    return val;
+  }
+
+  parseObject(index) {
+    if (index >= this.numObjects) return null;
+    const offset = this.offsets[index];
+    const marker = this.bytes[offset];
+    const type = (marker & 0xF0) >> 4;
+    let size = marker & 0x0F;
+    let pos = offset + 1;
+
+    switch (type) {
+      case 0x0: // null, bool, fill
+        if (size === 0) return null;
+        if (size === 8) return false;
+        if (size === 9) return true;
+        return null;
+
+      case 0x1: { // int
+        const byteCount = 1 << size;
+        if (byteCount <= 4) {
+          let val = 0;
+          for (let i = 0; i < byteCount; i++) val = val * 256 + this.bytes[pos + i];
+          return val;
+        }
+        let val = BigInt(0);
+        for (let i = 0; i < byteCount; i++) val = val * 256n + BigInt(this.bytes[pos + i]);
+        return Number(val);
+      }
+
+      case 0x2: { // float
+        if (size === 2) return this.view.getFloat32(pos);
+        if (size === 3) return this.view.getFloat64(pos);
+        return 0;
+      }
+
+      case 0x3: { // date
+        return new Date(978307200000 + this.view.getFloat64(pos) * 1000);
+      }
+
+      case 0x4: { // data
+        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
+        return this.bytes.slice(pos, pos + size);
+      }
+
+      case 0x5: { // ascii string
+        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
+        return String.fromCharCode(...this.bytes.slice(pos, pos + size));
+      }
+
+      case 0x6: { // unicode string
+        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
+        let str = '';
+        for (let i = 0; i < size; i++) {
+          str += String.fromCharCode(this.view.getUint16(pos + i * 2));
+        }
+        return str;
+      }
+
+      case 0x8: { // uid
+        const uidSize = size + 1;
+        let val = 0;
+        for (let i = 0; i < uidSize; i++) val = val * 256 + this.bytes[pos + i];
+        return { UID: val };
+      }
+
+      case 0xA: { // array
+        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
+        const arr = [];
+        for (let i = 0; i < size; i++) {
+          const ref = this.readSizedInt(pos + i * this.objectRefSize, this.objectRefSize);
+          arr.push(this.parseObject(ref));
+        }
+        return arr;
+      }
+
+      case 0xC: { // set (treat as array)
+        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
+        const arr = [];
+        for (let i = 0; i < size; i++) {
+          const ref = this.readSizedInt(pos + i * this.objectRefSize, this.objectRefSize);
+          arr.push(this.parseObject(ref));
+        }
+        return arr;
+      }
+
+      case 0xD: { // dict
+        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
+        const dict = {};
+        const keysStart = pos;
+        const valsStart = pos + size * this.objectRefSize;
+        for (let i = 0; i < size; i++) {
+          const keyRef = this.readSizedInt(keysStart + i * this.objectRefSize, this.objectRefSize);
+          const valRef = this.readSizedInt(valsStart + i * this.objectRefSize, this.objectRefSize);
+          const key = this.parseObject(keyRef);
+          const val = this.parseObject(valRef);
+          dict[key] = val;
+        }
+        return dict;
+      }
+
+      default:
+        return null;
+    }
+  }
+
+  parseExtendedSize(pos) {
+    const marker2 = this.bytes[pos];
+    const sizeType = (marker2 & 0xF0) >> 4;
+    const sizeSize = 1 << (marker2 & 0x0F);
+    let val = 0;
+    for (let i = 0; i < sizeSize; i++) {
+      val = val * 256 + this.bytes[pos + 1 + i];
+    }
+    this.extendedBytes = 1 + sizeSize;
+    return val;
+  }
+}
+
+// --- NSKeyedArchiver Decoder ---
+function decodeNSKeyedArchiver(plist) {
+  const objects = plist['$objects'];
+  if (!objects) throw new Error('Not an NSKeyedArchiver');
+
+  function resolve(val) {
+    if (val === null || val === undefined) return val;
+    if (val && typeof val === 'object' && 'UID' in val) {
+      return resolveObject(val.UID);
+    }
+    if (Array.isArray(val)) return val.map(resolve);
+    if (typeof val === 'object' && !ArrayBuffer.isView(val)) {
+      const out = {};
+      for (const [k, v] of Object.entries(val)) {
+        if (k === '$class' || k === '$classes') continue;
+        out[k] = resolve(v);
+      }
+      return out;
+    }
+    return val;
+  }
+
+  function resolveObject(index) {
+    if (index >= objects.length) return null;
+    const obj = objects[index];
+    if (obj === '$null') return null;
+    if (typeof obj !== 'object' || ArrayBuffer.isView(obj)) return obj;
+    if (Array.isArray(obj)) return obj.map(resolve);
+    
+    // Check if it's a special class
+    if (obj['$class']) {
+      const classInfo = objects[obj['$class'].UID];
+      const className = classInfo?.['$classname'] || '';
+      
+      // Handle NS arrays
+      if (className.includes('Array') || className.includes('Set')) {
+        const items = obj['NS.objects'] || obj['NS.keys'] || [];
+        return resolve(items);
+      }
+      // Handle NS data
+      if (className.includes('Data') || className === 'NSMutableData') {
+        return obj['NS.data'] || obj;
+      }
+      // Handle NS string
+      if (className.includes('String')) {
+        return obj['NS.string'] || '';
+      }
+    }
+    
+    return resolve(obj);
+  }
+
+  const topDict = plist['$top'];
+  const resolved = {};
+  for (const [k, v] of Object.entries(topDict)) {
+    resolved[k] = resolve(v);
+  }
+  return resolved;
+}
+
+
+// --- LZO1X DECOMPRESSOR ---
+function lzo1xDecompress(src, expectedSize) {
+  const dst = new Uint8Array(expectedSize || src.length * 4);
+  let ip = 0, op = 0;
+  let t, state = 0;
+
+  // Handle first byte
+  if (src[ip] > 17) {
+    t = src[ip++] - 17;
+    if (t < 4) {
+      state = t;
+      while (t-- > 0) dst[op++] = src[ip++];
+    } else {
+      while (t-- > 0) dst[op++] = src[ip++];
+      state = 0;
+      // continue to main loop
+      t = src[ip++];
+      if (t < 16) {
+        // literal run
+        return dst.subarray(0, op);
+      }
+    }
+  } else {
+    t = src[ip++];
+  }
+
+  for (;;) {
+    if (t >= 64) {
+      // short match
+      let len = 1 + ((t >> 5) & 0x07) + 1;
+      let dist = 1 + ((t & 0x1F) << 3) + (src[ip++] >> 2);
+      let mpos = op - dist;
+      state = src[ip - 1] & 3;
+      dst[op++] = dst[mpos++];
+      dst[op++] = dst[mpos++];
+      while (--len > 0) dst[op++] = dst[mpos++];
+    } else if (t >= 32) {
+      // long match
+      let len = (t & 0x1F);
+      if (len === 0) {
+        while (src[ip] === 0) { len += 255; ip++; }
+        len += 31 + src[ip++];
+      }
+      len += 2;
+      let dist = 1 + ((src[ip] >> 2) + (src[ip + 1] << 6));
+      ip += 2;
+      let mpos = op - dist;
+      state = src[ip - 2] & 3;
+      if (mpos < 0) break;
+      while (len-- > 0) dst[op++] = dst[mpos++];
+    } else if (t >= 16) {
+      // long literal or end marker
+      let dist = (t & 0x08) << 11;
+      let len = t & 0x07;
+      if (len === 0) {
+        while (src[ip] === 0) { len += 255; ip++; }
+        len += 7 + src[ip++];
+      }
+      dist += (src[ip] >> 2) + (src[ip + 1] << 6);
+      ip += 2;
+      if (dist === 0) return dst.subarray(0, op); // end marker
+      dist += 0x4000;
+      let mpos = op - dist;
+      state = src[ip - 2] & 3;
+      len += 2;
+      while (len-- > 0) dst[op++] = dst[mpos++];
+    } else {
+      // short literal / near match
+      let dist, len;
+      if (state === 0) {
+        // literal run
+        len = (t & 0x0F);
+        if (len === 0) {
+          while (src[ip] === 0) { len += 255; ip++; }
+          len += 15 + src[ip++];
+        }
+        len += 3;
+        while (len-- > 0) dst[op++] = src[ip++];
+        state = 0;
+        t = src[ip++];
+        if (t < 16) {
+          dist = 1 + 0x0800 + (t >> 2) + (src[ip++] << 2);
+          let mpos = op - dist;
+          state = src[ip - 1] & 3;
+          dst[op++] = dst[mpos++];
+          dst[op++] = dst[mpos++];
+          dst[op++] = dst[mpos++];
+          while (state-- > 0) dst[op++] = src[ip++];
+          state = src[ip - 1] & 3;
+          if (state > 0) { t = src[ip++]; continue; }
+          t = src[ip++];
+          continue;
+        }
+        continue;
+      } else {
+        dist = 1 + (t >> 2) + (src[ip++] << 2);
+        let mpos = op - dist;
+        dst[op++] = dst[mpos++];
+        dst[op++] = dst[mpos++];
+        state = src[ip - 1] & 3;
+      }
+    }
+    
+    // Copy literal run based on state
+    if (state > 0) {
+      while (state-- > 0) dst[op++] = src[ip++];
+      state = 0;
+    }
+    
+    t = src[ip++];
+    if (t < 16) {
+      let dist = 1 + (t >> 2) + (src[ip++] << 2);
+      let mpos = op - dist;
+      state = src[ip - 1] & 3;
+      dst[op++] = dst[mpos++];
+      dst[op++] = dst[mpos++];
+      while (state-- > 0) dst[op++] = src[ip++];
+      state = src[ip - 1] & 3;
+      if (state > 0) { t = src[ip++]; continue; }
+      t = src[ip++];
+    }
+  }
+  
+  return dst.subarray(0, op);
+}
+
+
+// --- PROCREATE FILE PARSER ---
+async function parseProcreateFile(arrayBuffer) {
+  const zip = await JSZip.loadAsync(arrayBuffer);
+  
+  // Parse Document.archive
+  const archiveFile = zip.file('Document.archive');
+  if (!archiveFile) throw new Error('No Document.archive found — not a valid .procreate file');
+  
+  const archiveData = await archiveFile.async('arraybuffer');
+  const plist = new BPlistParser(archiveData).parse();
+  const doc = decodeNSKeyedArchiver(plist);
+  const root = doc.root || Object.values(doc)[0];
+  
+  // Extract document info
+  let width, height;
+  
+  // Try different ways to get canvas size
+  if (root.size) {
+    if (typeof root.size === 'string') {
+      const match = root.size.match(/\{?\s*(\d+)\s*[,;]\s*(\d+)\s*\}?/);
+      if (match) { width = parseInt(match[1]); height = parseInt(match[2]); }
+    }
+  }
+  if (!width && root.SilicaDocumentArchiveDPIKey) {
+    // Look for orientation and size info
+  }
+  if (!width) {
+    // Try getting size from keys
+    const sizeKeys = ['ORKWidth', 'width', 'canvasWidth'];
+    const heightKeys = ['ORKHeight', 'height', 'canvasHeight'];
+    for (const k of sizeKeys) if (root[k]) width = root[k];
+    for (const k of heightKeys) if (root[k]) height = root[k];
+  }
+
+  // Try columns/rows-based approach
+  if (!width && root.tileSize) {
+    tileSize = root.tileSize || 256;
+  }
+
+  // Get tile size
+  tileSize = root.tileSize || root['$objects']?.[0]?.tileSize || 256;
+  if (typeof tileSize !== 'number' || tileSize <= 0) tileSize = 256;
+
+  // Extract layer info from the archive
+  let layerDefs = extractLayers(root, plist['$objects'] || []);
+
+  // If we still don't have dimensions, try to infer from chunks
+  if (!width || !height) {
+    const dims = await inferDimensions(zip, layerDefs, tileSize);
+    width = dims.width;
+    height = dims.height;
+  }
+
+  // Get thumbnail
+  let thumbnail = null;
+  const thumbFile = zip.file('QuickLook/Thumbnail.png');
+  if (thumbFile) {
+    const thumbData = await thumbFile.async('blob');
+    thumbnail = URL.createObjectURL(thumbData);
+  }
+
+  return { zip, width, height, tileSize, layerDefs, thumbnail, root };
+}
+
+function extractLayers(root, objects) {
+  const layerDefs = [];
+  
+  // Find layers - they can be under various keys
+  let layerArray = root.unwrappedLayers || root.layers || root['SilicaDocumentArchiveLayers'];
+  
+  if (!layerArray && objects) {
+    // Search through objects for SilicaLayer instances
+    for (const obj of objects) {
+      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+        if (obj['$class']) {
+          const classIdx = obj['$class']?.UID ?? obj['$class'];
+          const classObj = objects[classIdx];
+          if (classObj?.['$classname'] === 'SilicaLayer') {
+            layerDefs.push(extractLayerDef(obj, objects));
+          }
+        }
+      }
+    }
+  }
+  
+  if (Array.isArray(layerArray)) {
+    for (const layer of layerArray) {
+      if (layer && typeof layer === 'object') {
+        layerDefs.push(extractLayerDef(layer, objects));
+      }
+    }
+  }
+
+  return layerDefs;
+}
+
+function extractLayerDef(layer, objects) {
+  return {
+    uuid: layer.UUID || layer.uuid || '',
+    name: layer.name || layer.Name || 'Untitled Layer',
+    opacity: layer.opacity ?? layer.extendedBlend ?? 1.0,
+    blend: layer.blend ?? layer.blendMode ?? 0,
+    hidden: layer.hidden ?? layer.isHidden ?? false,
+    clipped: layer.clipped ?? false,
+  };
+}
+
+async function inferDimensions(zip, layerDefs, ts) {
+  let maxCol = 0, maxRow = 0;
+  
+  for (const layer of layerDefs) {
+    if (!layer.uuid) continue;
+    const folder = zip.folder(layer.uuid);
+    if (!folder) continue;
+    
+    folder.forEach((path) => {
+      const match = path.match(/(\d+)~(\d+)\.chunk$/);
+      if (match) {
+        maxCol = Math.max(maxCol, parseInt(match[1]) + 1);
+        maxRow = Math.max(maxRow, parseInt(match[2]) + 1);
+      }
+    });
+  }
+  
+  // Also check root level for UUIDs as folder names
+  if (maxCol === 0) {
+    zip.forEach((path, entry) => {
+      const match = path.match(/[^/]+\/(\d+)~(\d+)\.chunk$/);
+      if (match) {
+        maxCol = Math.max(maxCol, parseInt(match[1]) + 1);
+        maxRow = Math.max(maxRow, parseInt(match[2]) + 1);
+      }
+    });
+  }
+
+  // If still nothing, check for old-style numbered chunks
+  if (maxCol === 0) {
+    zip.forEach((path, entry) => {
+      const match = path.match(/[^/]+\/(\d+)$/);
+      if (match) {
+        const idx = parseInt(match[1]);
+        // We need to figure out the grid — use thumbnail
+        maxCol = Math.max(maxCol, idx + 1);
+      }
+    });
+  }
+
+  return {
+    width: maxCol * ts || 2048,
+    height: maxRow * ts || 2048
+  };
+}
+
+
+// --- LAYER LOADER ---
+async function loadLayer(zip, layerDef, w, h, ts) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  
+  const cols = Math.ceil(w / ts);
+  const rows = Math.ceil(h / ts);
+  const expectedChunkSize = ts * ts * 4; // BGRA
+  
+  let uuid = layerDef.uuid;
+  let chunksLoaded = 0;
+
+  // Try col~row.chunk format first
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const chunkPath = `${uuid}/${col}~${row}.chunk`;
+      const chunkFile = zip.file(chunkPath);
+      
+      if (!chunkFile) continue;
+      
+      try {
+        const compressed = await chunkFile.async('uint8array');
+        let pixels;
+        
+        try {
+          pixels = lzo1xDecompress(compressed, expectedChunkSize);
+        } catch (e) {
+          // Try raw if LZO fails
+          pixels = compressed;
+        }
+        
+        if (pixels.length >= expectedChunkSize) {
+          const imgData = ctx.createImageData(ts, ts);
+          // Convert from premultiplied BGRA to RGBA
+          for (let i = 0; i < ts * ts; i++) {
+            const si = i * 4;
+            const a = pixels[si + 3];
+            if (a === 0) continue;
+            // BGRA → RGBA, un-premultiply
+            const factor = a > 0 ? 255 / a : 0;
+            imgData.data[si + 0] = Math.min(255, pixels[si + 2] * factor); // R (was B)
+            imgData.data[si + 1] = Math.min(255, pixels[si + 1] * factor); // G
+            imgData.data[si + 2] = Math.min(255, pixels[si + 0] * factor); // B (was R)
+            imgData.data[si + 3] = a;
+          }
+          ctx.putImageData(imgData, col * ts, row * ts);
+          chunksLoaded++;
+        }
+      } catch (e) {
+        console.warn(`Failed to load chunk ${chunkPath}:`, e);
+      }
+    }
+  }
+  
+  // If no col~row chunks found, try numbered chunks (old format)
+  if (chunksLoaded === 0) {
+    for (let idx = 0; idx < cols * rows; idx++) {
+      const chunkPath = `${uuid}/${idx}`;
+      const chunkFile = zip.file(chunkPath);
+      if (!chunkFile) continue;
+      
+      try {
+        const compressed = await chunkFile.async('uint8array');
+        let pixels;
+        try {
+          pixels = lzo1xDecompress(compressed, expectedChunkSize);
+        } catch (e) {
+          pixels = compressed;
+        }
+        
+        if (pixels.length >= expectedChunkSize) {
+          const row = Math.floor(idx / cols);
+          const col = idx % cols;
+          const imgData = ctx.createImageData(ts, ts);
+          for (let i = 0; i < ts * ts; i++) {
+            const si = i * 4;
+            const a = pixels[si + 3];
+            if (a === 0) continue;
+            const factor = a > 0 ? 255 / a : 0;
+            imgData.data[si + 0] = Math.min(255, pixels[si + 2] * factor);
+            imgData.data[si + 1] = Math.min(255, pixels[si + 1] * factor);
+            imgData.data[si + 2] = Math.min(255, pixels[si + 0] * factor);
+            imgData.data[si + 3] = a;
+          }
+          ctx.putImageData(imgData, col * ts, row * ts);
+          chunksLoaded++;
+        }
+      } catch (e) { /* skip */ }
+    }
+  }
+  
+  return { canvas, chunksLoaded };
+}
+
+
+// --- COMPOSITING ---
+function compositeLayersOnCanvas(targetCanvas, layersToComposite) {
+  const ctx = targetCanvas.getContext('2d');
+  targetCanvas.width = canvasWidth;
+  targetCanvas.height = canvasHeight;
+
+  const showGrid = document.getElementById('showTransparency')?.checked;
+  
+  if (showGrid) {
+    // Draw transparency grid
+    const gridSize = 16;
+    for (let y = 0; y < canvasHeight; y += gridSize) {
+      for (let x = 0; x < canvasWidth; x += gridSize) {
+        const isLight = ((x / gridSize) + (y / gridSize)) % 2 === 0;
+        ctx.fillStyle = isLight ? '#3a3a3a' : '#2a2a2a';
+        ctx.fillRect(x, y, gridSize, gridSize);
+      }
+    }
+  } else {
+    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  }
+  
+  // Composite layers from bottom to top
+  for (let i = layersToComposite.length - 1; i >= 0; i--) {
+    const layer = layersToComposite[i];
+    if (!layer.canvas) continue;
+    ctx.globalAlpha = layer.opacity ?? 1;
+    ctx.globalCompositeOperation = getBlendMode(layer.blend);
+    ctx.drawImage(layer.canvas, 0, 0);
+  }
+  
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+function getBlendMode(blend) {
+  const modes = {
+    0: 'source-over',      // Normal
+    1: 'multiply',
+    2: 'screen',
+    3: 'overlay',
+    4: 'darken',
+    5: 'lighten',
+    6: 'color-dodge',
+    7: 'color-burn',
+    8: 'soft-light',
+    9: 'hard-light',
+    10: 'difference',
+    11: 'exclusion',
+    12: 'hue',
+    13: 'saturation',
+    14: 'color',
+    15: 'luminosity',
+  };
+  return modes[blend] || 'source-over';
+}
+
+
+// --- COLOR PALETTE EXTRACTION ---
+function extractPalette(canvas, numColors = 25) {
+  const ctx = canvas.getContext('2d');
+  // Sample at reduced resolution for performance
+  const sampleSize = 200;
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = sampleSize;
+  tempCanvas.height = sampleSize;
+  const tctx = tempCanvas.getContext('2d');
+  tctx.drawImage(canvas, 0, 0, sampleSize, sampleSize);
+  const data = tctx.getImageData(0, 0, sampleSize, sampleSize).data;
+  
+  // Collect non-transparent pixels
+  const pixels = [];
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3] < 128) continue; // skip transparent
+    pixels.push([data[i], data[i + 1], data[i + 2]]);
+  }
+  
+  if (pixels.length === 0) return [];
+  
+  // K-means clustering for palette extraction
+  return kMeansColors(pixels, numColors, 15);
+}
+
+function kMeansColors(pixels, k, iterations) {
+  // Initialize centroids with k-means++ style
+  const centroids = [pixels[Math.floor(Math.random() * pixels.length)].slice()];
+  
+  while (centroids.length < k) {
+    const dists = pixels.map(p => {
+      let minD = Infinity;
+      for (const c of centroids) {
+        const d = colorDist(p, c);
+        if (d < minD) minD = d;
+      }
+      return minD;
+    });
+    const totalDist = dists.reduce((a, b) => a + b, 0);
+    let r = Math.random() * totalDist;
+    for (let i = 0; i < dists.length; i++) {
+      r -= dists[i];
+      if (r <= 0) {
+        centroids.push(pixels[i].slice());
+        break;
+      }
+    }
+  }
+  
+  for (let iter = 0; iter < iterations; iter++) {
+    const clusters = Array.from({ length: k }, () => []);
+    
+    // Assign pixels to nearest centroid (sample for performance)
+    const samplePixels = pixels.length > 5000 
+      ? pixels.filter(() => Math.random() < 5000 / pixels.length) 
+      : pixels;
+      
+    for (const p of samplePixels) {
+      let minD = Infinity, minI = 0;
+      for (let i = 0; i < k; i++) {
+        const d = colorDist(p, centroids[i]);
+        if (d < minD) { minD = d; minI = i; }
+      }
+      clusters[minI].push(p);
+    }
+    
+    // Update centroids
+    for (let i = 0; i < k; i++) {
+      if (clusters[i].length === 0) continue;
+      centroids[i] = [
+        Math.round(clusters[i].reduce((s, p) => s + p[0], 0) / clusters[i].length),
+        Math.round(clusters[i].reduce((s, p) => s + p[1], 0) / clusters[i].length),
+        Math.round(clusters[i].reduce((s, p) => s + p[2], 0) / clusters[i].length),
+      ];
+    }
+  }
+  
+  // Sort by luminance
+  centroids.sort((a, b) => (0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2]) - 
+                            (0.299 * b[0] + 0.587 * b[1] + 0.114 * b[2]));
+  
+  return centroids;
+}
+
+function colorDist(a, b) {
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
+}
+
+
+// --- EXPORT FUNCTIONS ---
+function canvasToBlob(canvas, format, quality) {
+  return new Promise(resolve => {
+    if (format === 'tiff') {
+      resolve(generateTIFF(canvas));
+      return;
+    }
+    const mimeTypes = {
+      'png': 'image/png',
+      'jpg': 'image/jpeg',
+      'webp': 'image/webp',
+    };
+    canvas.toBlob(blob => resolve(blob), mimeTypes[format] || 'image/png', quality / 100);
+  });
+}
+
+function generateTIFF(canvas) {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const pixels = imgData.data;
+  const rgbLen = w * h * 3;
+  
+  // TIFF header + IFD
+  const headerSize = 8;
+  const ifdEntryCount = 12;
+  const ifdSize = 2 + ifdEntryCount * 12 + 4;
+  const dataOffset = headerSize + ifdSize + 20; // extra space for values
+  
+  const totalSize = dataOffset + rgbLen;
+  const buf = new ArrayBuffer(totalSize);
+  const view = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+  let pos = 0;
+  
+  // Header: little-endian
+  view.setUint16(0, 0x4949, false); // II
+  view.setUint16(2, 42, true);
+  view.setUint32(4, 8, true); // offset to first IFD
+  
+  // IFD
+  pos = 8;
+  view.setUint16(pos, ifdEntryCount, true); pos += 2;
+  
+  function writeIFDEntry(tag, type, count, value) {
+    view.setUint16(pos, tag, true); pos += 2;
+    view.setUint16(pos, type, true); pos += 2;
+    view.setUint32(pos, count, true); pos += 4;
+    view.setUint32(pos, value, true); pos += 4;
+  }
+  
+  writeIFDEntry(256, 3, 1, w);                  // ImageWidth
+  writeIFDEntry(257, 3, 1, h);                  // ImageLength
+  writeIFDEntry(258, 3, 3, headerSize + ifdSize); // BitsPerSample (offset)
+  writeIFDEntry(259, 3, 1, 1);                  // Compression: None
+  writeIFDEntry(262, 3, 1, 2);                  // PhotometricInterpretation: RGB
+  writeIFDEntry(273, 4, 1, dataOffset);          // StripOffsets
+  writeIFDEntry(277, 3, 1, 3);                  // SamplesPerPixel
+  writeIFDEntry(278, 3, 1, h);                  // RowsPerStrip
+  writeIFDEntry(279, 4, 1, rgbLen);              // StripByteCounts
+  writeIFDEntry(282, 5, 1, headerSize + ifdSize + 6);  // XResolution
+  writeIFDEntry(283, 5, 1, headerSize + ifdSize + 14); // YResolution
+  writeIFDEntry(296, 3, 1, 2);                  // ResolutionUnit: inch
+  
+  view.setUint32(pos, 0, true); // Next IFD offset (0 = none)
+  
+  // BitsPerSample values: 8, 8, 8
+  pos = headerSize + ifdSize;
+  view.setUint16(pos, 8, true); pos += 2;
+  view.setUint16(pos, 8, true); pos += 2;
+  view.setUint16(pos, 8, true); pos += 2;
+  
+  // XResolution: 72/1
+  view.setUint32(pos, 72, true); pos += 4;
+  view.setUint32(pos, 1, true); pos += 4;
+  // YResolution: 72/1
+  view.setUint32(pos, 72, true); pos += 4;
+  view.setUint32(pos, 1, true); pos += 4;
+  
+  // Pixel data (RGB, no alpha)
+  let pixPos = dataOffset;
+  for (let i = 0; i < w * h; i++) {
+    bytes[pixPos++] = pixels[i * 4];
+    bytes[pixPos++] = pixels[i * 4 + 1];
+    bytes[pixPos++] = pixels[i * 4 + 2];
+  }
+  
+  return new Blob([buf], { type: 'image/tiff' });
+}
+
+
+// --- SWATCH EXPORT ---
+function generateASE(colors) {
+  // Adobe Swatch Exchange format
+  const numColors = colors.length;
+  const chunks = [];
+  
+  // Header: ASEF + version + numBlocks
+  const header = new ArrayBuffer(12);
+  const hv = new DataView(header);
+  hv.setUint8(0, 0x41); hv.setUint8(1, 0x53); hv.setUint8(2, 0x45); hv.setUint8(3, 0x46); // ASEF
+  hv.setUint16(4, 1);    // Major version
+  hv.setUint16(6, 0);    // Minor version
+  hv.setUint32(8, numColors);
+  chunks.push(header);
+  
+  for (let i = 0; i < numColors; i++) {
+    const [r, g, b] = colors[i];
+    const name = `Color ${i + 1}`;
+    const nameChars = name.split('').map(c => c.charCodeAt(0));
+    const nameLen = nameChars.length + 1; // +1 for null terminator
+    
+    // Block: type(2) + blockLength(4) + nameLength(2) + name(nameLen*2) + colorModel(4) + values(12) + type(2)
+    const blockDataLen = 2 + nameLen * 2 + 4 + 12 + 2;
+    const block = new ArrayBuffer(6 + blockDataLen);
+    const bv = new DataView(block);
+    let bp = 0;
+    
+    bv.setUint16(bp, 0x0001); bp += 2;  // Color entry
+    bv.setUint32(bp, blockDataLen); bp += 4;
+    bv.setUint16(bp, nameLen); bp += 2;
+    for (const ch of nameChars) { bv.setUint16(bp, ch); bp += 2; }
+    bv.setUint16(bp, 0); bp += 2; // null terminator
+    
+    // Color model: RGB
+    bv.setUint8(bp, 0x52); bp++; // R
+    bv.setUint8(bp, 0x47); bp++; // G
+    bv.setUint8(bp, 0x42); bp++; // B
+    bv.setUint8(bp, 0x20); bp++; // space
+    
+    bv.setFloat32(bp, r / 255); bp += 4;
+    bv.setFloat32(bp, g / 255); bp += 4;
+    bv.setFloat32(bp, b / 255); bp += 4;
+    
+    bv.setUint16(bp, 2); // Global color type
+    
+    chunks.push(block);
+  }
+  
+  return new Blob(chunks, { type: 'application/octet-stream' });
+}
+
+function generateACT(colors) {
+  // Adobe Color Table: 256 * 3 bytes + 2 bytes count
+  const buf = new ArrayBuffer(772);
+  const bytes = new Uint8Array(buf);
+  
+  for (let i = 0; i < Math.min(colors.length, 256); i++) {
+    bytes[i * 3] = colors[i][0];
+    bytes[i * 3 + 1] = colors[i][1];
+    bytes[i * 3 + 2] = colors[i][2];
+  }
+  
+  // Color count at offset 768
+  const view = new DataView(buf);
+  view.setUint16(768, Math.min(colors.length, 256));
+  view.setUint16(770, 0xFFFF); // transparency index (none)
+  
+  return new Blob([buf], { type: 'application/octet-stream' });
+}
+
+function generateSwatches(colors) {
+  // Procreate .swatches format (JSON in a zip-like wrapper)
+  const swatchData = colors.map((c, i) => ({
+    hue: rgbToHsl(c[0], c[1], c[2])[0],
+    saturation: rgbToHsl(c[0], c[1], c[2])[1],
+    brightness: rgbToHsl(c[0], c[1], c[2])[2],
+    alpha: 1,
+    colorSpace: 0
+  }));
+  
+  const jsonStr = JSON.stringify([{
+    name: 'Extracted Palette',
+    swatches: swatchData
+  }]);
+  
+  return new Blob([jsonStr], { type: 'application/octet-stream' });
+}
+
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s, l = (max + min) / 2;
+  if (max === min) { h = s = 0; }
+  else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
+      case g: h = ((b - r) / d + 2) / 6; break;
+      case b: h = ((r - g) / d + 4) / 6; break;
+    }
+  }
+  return [h, s, l];
+}
+
+function rgbToHex(r, g, b) {
+  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
+
+// ========================================================================
+// UI LOGIC
+// ========================================================================
+
+// --- FILE UPLOAD ---
+const uploadZone = document.getElementById('uploadZone');
+const fileInput = document.getElementById('fileInput');
+
+uploadZone.addEventListener('click', () => fileInput.click());
+uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
+uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
+uploadZone.addEventListener('drop', e => {
+  e.preventDefault();
+  uploadZone.classList.remove('dragover');
+  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', e => {
+  if (e.target.files.length > 0) handleFile(e.target.files[0]);
+});
+
+async function handleFile(file) {
+  if (!file.name.endsWith('.procreate')) {
+    showToast('Please select a .procreate file');
+    return;
+  }
+
+  // Show workspace
+  document.getElementById('workspace').classList.remove('no-file');
+  document.getElementById('uploadScreen').classList.add('hidden');
+  document.getElementById('layerPanel').classList.remove('hidden');
+  document.getElementById('canvasArea').classList.remove('hidden');
+  document.getElementById('rightPanel').classList.remove('hidden');
+  document.getElementById('fileInfo').classList.remove('hidden');
+  document.getElementById('btnNewFile').classList.remove('hidden');
+  document.getElementById('fileInfo').textContent = file.name;
+  
+  showLoading('Reading file...');
+  
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    setProgress(20);
+    setLoadingText('Parsing document structure...');
+    
+    procFile = await parseProcreateFile(arrayBuffer);
+    canvasWidth = procFile.width;
+    canvasHeight = procFile.height;
+    tileSize = procFile.tileSize;
+    
+    setProgress(40);
+    setLoadingText('Loading layers...');
+    
+    // Load each layer
+    layers = [];
+    const totalLayers = procFile.layerDefs.length;
+    
+    for (let i = 0; i < totalLayers; i++) {
+      const def = procFile.layerDefs[i];
+      setLoadingText(`Loading layer ${i + 1}/${totalLayers}: ${def.name}`);
+      setProgress(40 + (50 * (i / totalLayers)));
+      
+      let layerCanvas = null;
+      let chunksLoaded = 0;
+      
+      if (def.uuid) {
+        const result = await loadLayer(procFile.zip, def, canvasWidth, canvasHeight, tileSize);
+        layerCanvas = result.canvas;
+        chunksLoaded = result.chunksLoaded;
+      }
+      
+      layers.push({
+        ...def,
+        canvas: layerCanvas,
+        visible: !def.hidden,
+        selected: true,
+        chunksLoaded,
+        index: i
+      });
+    }
+    
+    // If no layer data loaded, try using thumbnail
+    if (layers.every(l => l.chunksLoaded === 0) && procFile.thumbnail) {
+      setLoadingText('Using thumbnail preview...');
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = procFile.thumbnail;
+      });
+      canvasWidth = img.naturalWidth;
+      canvasHeight = img.naturalHeight;
+      
+      const thumbCanvas = document.createElement('canvas');
+      thumbCanvas.width = canvasWidth;
+      thumbCanvas.height = canvasHeight;
+      thumbCanvas.getContext('2d').drawImage(img, 0, 0);
+      
+      if (layers.length === 0) {
+        layers.push({
+          name: 'Thumbnail Preview',
+          uuid: '',
+          opacity: 1,
+          blend: 0,
+          hidden: false,
+          clipped: false,
+          canvas: thumbCanvas,
+          visible: true,
+          selected: true,
+          chunksLoaded: 1,
+          index: 0
+        });
+      }
+    }
+
+    setProgress(95);
+    setLoadingText('Rendering...');
+    
+    // Build layer list UI
+    buildLayerList();
+    
+    // Render composite
+    renderView();
+    
+    // Extract color palette
+    extractAndShowPalette();
+    
+    // Update status
+    updateStatus();
+    
+    setProgress(100);
+    hideLoading();
+    
+    showToast(`Loaded ${layers.length} layers (${canvasWidth}×${canvasHeight})`);
+    
+  } catch (err) {
+    console.error('Parse error:', err);
+    hideLoading();
+    showToast('Error: ' + err.message);
+    
+    // Try thumbnail fallback
+    if (procFile?.thumbnail) {
+      showToast('Falling back to thumbnail preview');
+    }
+  }
+}
+
+// --- LAYER LIST UI ---
+function buildLayerList() {
+  const list = document.getElementById('layerList');
+  list.innerHTML = '';
+  
+  layers.forEach((layer, i) => {
+    const el = document.createElement('div');
+    el.className = `layer-item ${layer.selected ? 'selected' : ''} ${!layer.visible ? 'hidden-layer' : ''}`;
+    el.dataset.index = i;
+    
+    // Thumbnail
+    const thumb = document.createElement('div');
+    thumb.className = 'layer-thumb';
+    if (layer.canvas) {
+      const tc = document.createElement('canvas');
+      tc.width = 40; tc.height = 40;
+      const tctx = tc.getContext('2d');
+      // Draw checker
+      for (let y = 0; y < 40; y += 5) {
+        for (let x = 0; x < 40; x += 5) {
+          tctx.fillStyle = ((x / 5 + y / 5) % 2 === 0) ? '#444' : '#333';
+          tctx.fillRect(x, y, 5, 5);
+        }
+      }
+      tctx.drawImage(layer.canvas, 0, 0, 40, 40);
+      thumb.appendChild(tc);
+    }
+    
+    // Info
+    const info = document.createElement('div');
+    info.className = 'layer-info';
+    info.innerHTML = `
+      <div class="layer-name">${layer.name || `Layer ${i + 1}`}</div>
+      <div class="layer-meta">${Math.round(layer.opacity * 100)}% · ${getBlendModeName(layer.blend)}</div>
+    `;
+    
+    // Visibility toggle
+    const vis = document.createElement('button');
+    vis.className = `layer-vis ${!layer.visible ? 'off' : ''}`;
+    vis.innerHTML = layer.visible ? '👁' : '👁‍🗨';
+    vis.title = 'Toggle visibility';
+    vis.addEventListener('click', (e) => {
+      e.stopPropagation();
+      layer.visible = !layer.visible;
+      buildLayerList();
+      renderView();
+    });
+    
+    // Selection checkbox
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.className = 'layer-check';
+    check.checked = layer.selected;
+    check.addEventListener('change', (e) => {
+      e.stopPropagation();
+      layer.selected = check.checked;
+      buildLayerList();
+      if (currentView === 'selected') renderView();
+    });
+    
+    el.addEventListener('click', () => {
+      if (currentView === 'single') {
+        layers.forEach(l => l._singleActive = false);
+        layer._singleActive = true;
+        buildLayerList();
+        renderView();
+      }
+    });
+    
+    if (currentView === 'single' && layer._singleActive) {
+      el.classList.add('selected');
+    }
+    
+    el.appendChild(check);
+    el.appendChild(thumb);
+    el.appendChild(info);
+    el.appendChild(vis);
+    
+    list.appendChild(el);
+  });
+}
+
+function getBlendModeName(blend) {
+  const names = ['Normal','Multiply','Screen','Overlay','Darken','Lighten',
+    'Color Dodge','Color Burn','Soft Light','Hard Light','Difference',
+    'Exclusion','Hue','Saturation','Color','Luminosity'];
+  return names[blend] || 'Normal';
+}
+
+function selectAllLayers() {
+  layers.forEach(l => l.selected = true);
+  buildLayerList();
+  if (currentView === 'selected') renderView();
+}
+
+function deselectAllLayers() {
+  layers.forEach(l => l.selected = false);
+  buildLayerList();
+  if (currentView === 'selected') renderView();
+}
+
+// --- VIEW RENDERING ---
+function setView(view) {
+  currentView = view;
+  document.querySelectorAll('.canvas-toolbar .btn-group .btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === view);
+  });
+  buildLayerList();
+  renderView();
+}
+
+function renderView() {
+  const mainCanvas = document.getElementById('mainCanvas');
+  
+  let layersToRender;
+  switch (currentView) {
+    case 'composite':
+      layersToRender = layers.filter(l => l.visible);
+      break;
+    case 'selected':
+      layersToRender = layers.filter(l => l.selected && l.visible);
+      break;
+    case 'single':
+      const active = layers.find(l => l._singleActive) || layers[0];
+      if (active) active._singleActive = true;
+      layersToRender = active ? [{ ...active, opacity: 1 }] : [];
+      break;
+  }
+  
+  compositeLayersOnCanvas(mainCanvas, layersToRender);
+}
+
+// --- ZOOM ---
+function zoomCanvas(dir) {
+  if (dir === 0) {
+    // Fit
+    const viewport = document.getElementById('canvasViewport');
+    const vw = viewport.clientWidth - 48;
+    const vh = viewport.clientHeight - 48;
+    zoomFactor = Math.min(vw / canvasWidth, vh / canvasHeight, 1);
+  } else if (dir > 0) {
+    zoomFactor = Math.min(zoomFactor * 1.25, 5);
+  } else {
+    zoomFactor = Math.max(zoomFactor * 0.8, 0.1);
+  }
+  
+  const container = document.getElementById('canvasContainer');
+  container.style.width = (canvasWidth * zoomFactor) + 'px';
+  container.style.height = (canvasHeight * zoomFactor) + 'px';
+  document.getElementById('zoomLevel').textContent = Math.round(zoomFactor * 100) + '%';
+}
+
+// --- FORMAT SELECTION ---
+function selectFormat(fmt) {
+  selectedFormat = fmt;
+  document.querySelectorAll('.format-option').forEach(el => {
+    el.classList.toggle('selected', el.dataset.format === fmt);
+  });
+  
+  const qc = document.getElementById('qualityControl');
+  qc.classList.toggle('hidden', fmt === 'png' || fmt === 'tiff');
+}
+
+document.getElementById('qualitySlider').addEventListener('input', e => {
+  document.getElementById('qualityValue').textContent = e.target.value + '%';
+});
+
+document.querySelectorAll('input[name="exportMode"]').forEach(radio => {
+  radio.addEventListener('change', e => {
+    document.getElementById('rangeControl').classList.toggle('hidden', e.target.value !== 'range');
+  });
+});
+
+// --- EXPORT ---
+async function exportLayers() {
+  const mode = document.querySelector('input[name="exportMode"]:checked').value;
+  const quality = parseInt(document.getElementById('qualitySlider').value);
+  const ext = selectedFormat === 'jpg' ? 'jpg' : selectedFormat;
+  
+  showLoading('Exporting...');
+  
+  try {
+    if (mode === 'composite') {
+      const exportCanvas = document.createElement('canvas');
+      compositeLayersOnCanvas(exportCanvas, layers.filter(l => l.visible));
+      // Remove transparency grid for export
+      if (selectedFormat === 'jpg') {
+        const solidCanvas = document.createElement('canvas');
+        solidCanvas.width = canvasWidth;
+        solidCanvas.height = canvasHeight;
+        const sctx = solidCanvas.getContext('2d');
+        sctx.fillStyle = '#ffffff';
+        sctx.fillRect(0, 0, canvasWidth, canvasHeight);
+        sctx.drawImage(exportCanvas, 0, 0);
+        const blob = await canvasToBlob(solidCanvas, selectedFormat, quality);
+        downloadBlob(blob, `composite.${ext}`);
+      } else {
+        // Re-render without grid
+        const cleanCanvas = document.createElement('canvas');
+        cleanCanvas.width = canvasWidth;
+        cleanCanvas.height = canvasHeight;
+        const cctx = cleanCanvas.getContext('2d');
+        const visibleLayers = layers.filter(l => l.visible);
+        for (let i = visibleLayers.length - 1; i >= 0; i--) {
+          const layer = visibleLayers[i];
+          if (!layer.canvas) continue;
+          cctx.globalAlpha = layer.opacity ?? 1;
+          cctx.globalCompositeOperation = getBlendMode(layer.blend);
+          cctx.drawImage(layer.canvas, 0, 0);
+        }
+        cctx.globalAlpha = 1;
+        cctx.globalCompositeOperation = 'source-over';
+        const blob = await canvasToBlob(cleanCanvas, selectedFormat, quality);
+        downloadBlob(blob, `composite.${ext}`);
+      }
+      
+    } else if (mode === 'selected') {
+      const selected = layers.filter(l => l.selected && l.visible);
+      const cleanCanvas = document.createElement('canvas');
+      cleanCanvas.width = canvasWidth;
+      cleanCanvas.height = canvasHeight;
+      const cctx = cleanCanvas.getContext('2d');
+      if (selectedFormat === 'jpg') {
+        cctx.fillStyle = '#ffffff';
+        cctx.fillRect(0, 0, canvasWidth, canvasHeight);
+      }
+      for (let i = selected.length - 1; i >= 0; i--) {
+        if (!selected[i].canvas) continue;
+        cctx.globalAlpha = selected[i].opacity ?? 1;
+        cctx.globalCompositeOperation = getBlendMode(selected[i].blend);
+        cctx.drawImage(selected[i].canvas, 0, 0);
+      }
+      const blob = await canvasToBlob(cleanCanvas, selectedFormat, quality);
+      downloadBlob(blob, `selected_layers.${ext}`);
+      
+    } else if (mode === 'individual') {
+      for (let i = 0; i < layers.length; i++) {
+        const layer = layers[i];
+        if (!layer.canvas) continue;
+        setLoadingText(`Exporting layer ${i + 1}/${layers.length}...`);
+        setProgress((i / layers.length) * 100);
+        
+        const exportCanvas = document.createElement('canvas');
+        exportCanvas.width = canvasWidth;
+        exportCanvas.height = canvasHeight;
+        const ectx = exportCanvas.getContext('2d');
+        if (selectedFormat === 'jpg') {
+          ectx.fillStyle = '#ffffff';
+          ectx.fillRect(0, 0, canvasWidth, canvasHeight);
+        }
+        ectx.drawImage(layer.canvas, 0, 0);
+        
+        const blob = await canvasToBlob(exportCanvas, selectedFormat, quality);
+        const safeName = (layer.name || `layer_${i + 1}`).replace(/[^a-zA-Z0-9_-]/g, '_');
+        downloadBlob(blob, `${String(i + 1).padStart(2, '0')}_${safeName}.${ext}`);
+        
+        await new Promise(r => setTimeout(r, 100)); // small delay for bulk
+      }
+      
+    } else if (mode === 'range') {
+      const rangeStr = document.getElementById('layerRange').value;
+      const indices = parseRange(rangeStr, layers.length);
+      
+      if (indices.length === 0) {
+        showToast('Invalid range. Use format like: 1-5, 7, 9-10');
+        hideLoading();
+        return;
+      }
+      
+      const cleanCanvas = document.createElement('canvas');
+      cleanCanvas.width = canvasWidth;
+      cleanCanvas.height = canvasHeight;
+      const cctx = cleanCanvas.getContext('2d');
+      if (selectedFormat === 'jpg') {
+        cctx.fillStyle = '#ffffff';
+        cctx.fillRect(0, 0, canvasWidth, canvasHeight);
+      }
+      
+      // Composite the specified layers (bottom to top)
+      const sortedIndices = [...indices].sort((a, b) => b - a);
+      for (const idx of sortedIndices) {
+        const layer = layers[idx];
+        if (!layer?.canvas) continue;
+        cctx.globalAlpha = layer.opacity ?? 1;
+        cctx.globalCompositeOperation = getBlendMode(layer.blend);
+        cctx.drawImage(layer.canvas, 0, 0);
+      }
+      
+      const blob = await canvasToBlob(cleanCanvas, selectedFormat, quality);
+      downloadBlob(blob, `layers_${rangeStr.replace(/\s/g, '')}.${ext}`);
+    }
+    
+    hideLoading();
+    showToast('Export complete!');
+    
+  } catch (err) {
+    console.error('Export error:', err);
+    hideLoading();
+    showToast('Export failed: ' + err.message);
+  }
+}
+
+function parseRange(str, max) {
+  const indices = new Set();
+  const parts = str.split(',').map(s => s.trim());
+  
+  for (const part of parts) {
+    if (part.includes('-')) {
+      const [start, end] = part.split('-').map(Number);
+      if (isNaN(start) || isNaN(end)) continue;
+      for (let i = Math.max(1, start); i <= Math.min(max, end); i++) {
+        indices.add(i - 1); // 0-indexed
+      }
+    } else {
+      const n = parseInt(part);
+      if (!isNaN(n) && n >= 1 && n <= max) {
+        indices.add(n - 1);
+      }
+    }
+  }
+  
+  return [...indices];
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+
+// --- PALETTE ---
+function extractAndShowPalette() {
+  const compositeCanvas = document.createElement('canvas');
+  compositeCanvas.width = canvasWidth;
+  compositeCanvas.height = canvasHeight;
+  const ctx = compositeCanvas.getContext('2d');
+  
+  const visible = layers.filter(l => l.visible);
+  for (let i = visible.length - 1; i >= 0; i--) {
+    if (!visible[i].canvas) continue;
+    ctx.globalAlpha = visible[i].opacity ?? 1;
+    ctx.drawImage(visible[i].canvas, 0, 0);
+  }
+  
+  palette = extractPalette(compositeCanvas, 25);
+  showPalette();
+}
+
+function showPalette() {
+  const area = document.getElementById('paletteArea');
+  if (palette.length === 0) {
+    area.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No colors found</div>';
+    return;
+  }
+  
+  let html = '<div class="palette-grid">';
+  for (const [r, g, b] of palette) {
+    const hex = rgbToHex(r, g, b);
+    html += `<div class="palette-swatch" style="background:${hex}" onclick="navigator.clipboard.writeText('${hex}').then(()=>showToast('Copied ${hex}'))">
+      <div class="tooltip">${hex}</div>
+    </div>`;
+  }
+  html += '</div>';
+  area.innerHTML = html;
+  
+  document.getElementById('paletteActions').classList.remove('hidden');
+}
+
+function regeneratePalette() {
+  extractAndShowPalette();
+  showToast('Palette regenerated');
+}
+
+function exportPalette(format) {
+  if (palette.length === 0) {
+    showToast('No palette to export');
+    return;
+  }
+  
+  let blob, filename;
+  switch (format) {
+    case 'ase':
+      blob = generateASE(palette);
+      filename = 'palette.ase';
+      break;
+    case 'act':
+      blob = generateACT(palette);
+      filename = 'palette.act';
+      break;
+    case 'swatches':
+      blob = generateSwatches(palette);
+      filename = 'palette.swatches';
+      break;
+  }
+  
+  if (blob) {
+    downloadBlob(blob, filename);
+    showToast(`Exported ${filename}`);
+  }
+}
+
+
+// --- UI HELPERS ---
+function showLoading(text) {
+  document.getElementById('loadingOverlay').classList.remove('hidden');
+  document.getElementById('loadingText').textContent = text || 'Loading...';
+  document.getElementById('progressFill').style.width = '0%';
+}
+
+function hideLoading() {
+  document.getElementById('loadingOverlay').classList.add('hidden');
+}
+
+function setLoadingText(text) {
+  document.getElementById('loadingText').textContent = text;
+}
+
+function setProgress(pct) {
+  document.getElementById('progressFill').style.width = pct + '%';
+}
+
+function updateStatus() {
+  document.getElementById('statusLeft').textContent = 
+    `${canvasWidth}×${canvasHeight} · ${layers.length} layers · Tile: ${tileSize}px`;
+  document.getElementById('statusRight').textContent = 
+    `${layers.filter(l => l.visible).length} visible · ${layers.filter(l => l.selected).length} selected`;
+}
+
+function showToast(msg) {
+  const toast = document.getElementById('toast');
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 3000);
+}
+
+function resetApp() {
+  procFile = null;
+  layers = [];
+  palette = [];
+  canvasWidth = 0;
+  canvasHeight = 0;
+  
+  document.getElementById('workspace').classList.add('no-file');
+  document.getElementById('uploadScreen').classList.remove('hidden');
+  document.getElementById('layerPanel').classList.add('hidden');
+  document.getElementById('canvasArea').classList.add('hidden');
+  document.getElementById('rightPanel').classList.add('hidden');
+  document.getElementById('fileInfo').classList.add('hidden');
+  document.getElementById('btnNewFile').classList.add('hidden');
+  document.getElementById('fileInput').value = '';
+}
+
+// Init zoom on first render
+setTimeout(() => zoomCanvas(0), 100);
+</script>
+</body>
+</html>
