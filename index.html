@@ -971,86 +971,127 @@ class BPlistParser {
   }
 }
 
-// --- NSKeyedArchiver Decoder ---
+// --- NSKeyedArchiver Decoder (with cycle detection) ---
 function decodeNSKeyedArchiver(plist) {
   const objects = plist['$objects'];
   if (!objects) throw new Error('Not an NSKeyedArchiver');
 
-  function resolve(val) {
-    if (val === null || val === undefined) return val;
-    if (val && typeof val === 'object' && 'UID' in val) {
-      return resolveObject(val.UID);
+  // Cache resolved objects and track in-progress resolutions to break cycles
+  const resolved = new Map();
+  const inProgress = new Set();
+
+  function getClassName(obj) {
+    if (!obj || !obj['$class']) return '';
+    const classRef = obj['$class'];
+    const classIdx = classRef?.UID ?? classRef;
+    if (typeof classIdx === 'number' && classIdx < objects.length) {
+      const classObj = objects[classIdx];
+      return classObj?.['$classname'] || '';
     }
-    if (Array.isArray(val)) return val.map(resolve);
-    if (typeof val === 'object' && !ArrayBuffer.isView(val)) {
-      const out = {};
-      for (const [k, v] of Object.entries(val)) {
-        if (k === '$class' || k === '$classes') continue;
-        out[k] = resolve(v);
-      }
-      return out;
-    }
-    return val;
+    return '';
+  }
+
+  function resolveUID(uid) {
+    if (uid === null || uid === undefined) return null;
+    const index = uid?.UID ?? uid;
+    if (typeof index !== 'number' || index >= objects.length) return null;
+    return resolveObject(index);
   }
 
   function resolveObject(index) {
     if (index >= objects.length) return null;
+    if (resolved.has(index)) return resolved.get(index);
+    if (inProgress.has(index)) return null; // Break cycle
+
     const obj = objects[index];
-    if (obj === '$null') return null;
-    if (typeof obj !== 'object' || ArrayBuffer.isView(obj)) return obj;
-    if (Array.isArray(obj)) return obj.map(resolve);
-    
-    // Check if it's a special class
-    if (obj['$class']) {
-      const classInfo = objects[obj['$class'].UID];
-      const className = classInfo?.['$classname'] || '';
-      
-      // Handle NS arrays
-      if (className.includes('Array') || className.includes('Set')) {
-        const items = obj['NS.objects'] || obj['NS.keys'] || [];
-        return resolve(items);
+    if (obj === '$null' || obj === null) return null;
+    if (typeof obj === 'string') return obj;
+    if (typeof obj === 'number' || typeof obj === 'boolean') return obj;
+    if (ArrayBuffer.isView(obj)) return obj;
+
+    inProgress.add(index);
+
+    let result;
+    try {
+      if (Array.isArray(obj)) {
+        result = obj.map(item => resolveValue(item));
+      } else if (typeof obj === 'object') {
+        const className = getClassName(obj);
+
+        if (className.includes('Array') || className.includes('Set')) {
+          const items = obj['NS.objects'] || [];
+          result = (Array.isArray(items) ? items : [items]).map(item => resolveValue(item));
+        } else if (className.includes('Data') || className === 'NSMutableData') {
+          result = obj['NS.data'] || null;
+        } else if (className.includes('String')) {
+          result = obj['NS.string'] || '';
+        } else {
+          // Generic dictionary/object
+          result = {};
+          for (const [k, v] of Object.entries(obj)) {
+            if (k === '$class' || k === '$classes') continue;
+            result[k] = resolveValue(v);
+          }
+        }
+      } else {
+        result = obj;
       }
-      // Handle NS data
-      if (className.includes('Data') || className === 'NSMutableData') {
-        return obj['NS.data'] || obj;
-      }
-      // Handle NS string
-      if (className.includes('String')) {
-        return obj['NS.string'] || '';
-      }
+    } catch (e) {
+      result = null;
     }
-    
-    return resolve(obj);
+
+    inProgress.delete(index);
+    resolved.set(index, result);
+    return result;
+  }
+
+  function resolveValue(val) {
+    if (val === null || val === undefined) return val;
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return val;
+    if (ArrayBuffer.isView(val)) return val;
+    if (val && typeof val === 'object' && 'UID' in val) {
+      return resolveUID(val);
+    }
+    if (Array.isArray(val)) return val.map(item => resolveValue(item));
+    // Don't deep-resolve plain objects to avoid recursion — only resolve UIDs
+    return val;
   }
 
   const topDict = plist['$top'];
-  const resolved = {};
+  const out = {};
   for (const [k, v] of Object.entries(topDict)) {
-    resolved[k] = resolve(v);
+    out[k] = resolveValue(v);
   }
-  return resolved;
+  return { resolved: out, objects, resolveObject, resolveUID, getClassName };
 }
 
 
 // --- LZO1X DECOMPRESSOR ---
 function lzo1xDecompress(src, expectedSize) {
-  const dst = new Uint8Array(expectedSize || src.length * 4);
+  const maxOutput = expectedSize || src.length * 10;
+  const dst = new Uint8Array(maxOutput);
   let ip = 0, op = 0;
   let t, state = 0;
+  const srcLen = src.length;
+
+  // Safety: prevent infinite loops
+  const maxIterations = srcLen * 20;
+  let iterations = 0;
 
   // Handle first byte
+  if (ip >= srcLen) return dst.subarray(0, 0);
+  
   if (src[ip] > 17) {
     t = src[ip++] - 17;
     if (t < 4) {
       state = t;
-      while (t-- > 0) dst[op++] = src[ip++];
+      while (t-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
     } else {
-      while (t-- > 0) dst[op++] = src[ip++];
+      while (t-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
       state = 0;
-      // continue to main loop
+      if (ip >= srcLen) return dst.subarray(0, op);
       t = src[ip++];
       if (t < 16) {
-        // literal run
         return dst.subarray(0, op);
       }
     }
@@ -1058,99 +1099,119 @@ function lzo1xDecompress(src, expectedSize) {
     t = src[ip++];
   }
 
-  for (;;) {
+  for (;ip < srcLen && op < maxOutput;) {
+    if (++iterations > maxIterations) break;
+    
     if (t >= 64) {
-      // short match
       let len = 1 + ((t >> 5) & 0x07) + 1;
       let dist = 1 + ((t & 0x1F) << 3) + (src[ip++] >> 2);
       let mpos = op - dist;
+      if (mpos < 0) break;
       state = src[ip - 1] & 3;
-      dst[op++] = dst[mpos++];
-      dst[op++] = dst[mpos++];
-      while (--len > 0) dst[op++] = dst[mpos++];
+      while (len-- > 0 && op < maxOutput) dst[op++] = dst[mpos++];
     } else if (t >= 32) {
-      // long match
       let len = (t & 0x1F);
       if (len === 0) {
-        while (src[ip] === 0) { len += 255; ip++; }
+        while (ip < srcLen && src[ip] === 0) { len += 255; ip++; if (len > maxOutput) break; }
+        if (ip >= srcLen) break;
         len += 31 + src[ip++];
       }
       len += 2;
+      if (ip + 1 >= srcLen) break;
       let dist = 1 + ((src[ip] >> 2) + (src[ip + 1] << 6));
       ip += 2;
       let mpos = op - dist;
-      state = src[ip - 2] & 3;
       if (mpos < 0) break;
-      while (len-- > 0) dst[op++] = dst[mpos++];
+      state = src[ip - 2] & 3;
+      while (len-- > 0 && op < maxOutput) dst[op++] = dst[mpos++];
     } else if (t >= 16) {
-      // long literal or end marker
       let dist = (t & 0x08) << 11;
       let len = t & 0x07;
       if (len === 0) {
-        while (src[ip] === 0) { len += 255; ip++; }
+        while (ip < srcLen && src[ip] === 0) { len += 255; ip++; if (len > maxOutput) break; }
+        if (ip >= srcLen) break;
         len += 7 + src[ip++];
       }
+      if (ip + 1 >= srcLen) break;
       dist += (src[ip] >> 2) + (src[ip + 1] << 6);
       ip += 2;
       if (dist === 0) return dst.subarray(0, op); // end marker
       dist += 0x4000;
       let mpos = op - dist;
+      if (mpos < 0) break;
       state = src[ip - 2] & 3;
       len += 2;
-      while (len-- > 0) dst[op++] = dst[mpos++];
+      while (len-- > 0 && op < maxOutput) dst[op++] = dst[mpos++];
     } else {
-      // short literal / near match
-      let dist, len;
       if (state === 0) {
-        // literal run
-        len = (t & 0x0F);
+        let len = (t & 0x0F);
         if (len === 0) {
-          while (src[ip] === 0) { len += 255; ip++; }
+          while (ip < srcLen && src[ip] === 0) { len += 255; ip++; if (len > maxOutput) break; }
+          if (ip >= srcLen) break;
           len += 15 + src[ip++];
         }
         len += 3;
-        while (len-- > 0) dst[op++] = src[ip++];
+        while (len-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
         state = 0;
+        if (ip >= srcLen) break;
         t = src[ip++];
         if (t < 16) {
-          dist = 1 + 0x0800 + (t >> 2) + (src[ip++] << 2);
-          let mpos = op - dist;
+          let dist2 = 1 + 0x0800 + (t >> 2) + (src[ip++] << 2);
+          let mpos2 = op - dist2;
+          if (mpos2 < 0 || ip >= srcLen) break;
           state = src[ip - 1] & 3;
-          dst[op++] = dst[mpos++];
-          dst[op++] = dst[mpos++];
-          dst[op++] = dst[mpos++];
-          while (state-- > 0) dst[op++] = src[ip++];
+          if (op + 3 <= maxOutput) {
+            dst[op++] = dst[mpos2++];
+            dst[op++] = dst[mpos2++];
+            dst[op++] = dst[mpos2++];
+          }
+          let st = state;
+          while (st-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
+          if (ip >= srcLen) break;
           state = src[ip - 1] & 3;
           if (state > 0) { t = src[ip++]; continue; }
+          if (ip >= srcLen) break;
           t = src[ip++];
           continue;
         }
         continue;
       } else {
-        dist = 1 + (t >> 2) + (src[ip++] << 2);
-        let mpos = op - dist;
-        dst[op++] = dst[mpos++];
-        dst[op++] = dst[mpos++];
+        if (ip >= srcLen) break;
+        let dist3 = 1 + (t >> 2) + (src[ip++] << 2);
+        let mpos3 = op - dist3;
+        if (mpos3 < 0) break;
+        if (op + 2 <= maxOutput) {
+          dst[op++] = dst[mpos3++];
+          dst[op++] = dst[mpos3++];
+        }
         state = src[ip - 1] & 3;
       }
     }
     
     // Copy literal run based on state
     if (state > 0) {
-      while (state-- > 0) dst[op++] = src[ip++];
+      let st = state;
+      while (st-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
       state = 0;
     }
     
+    if (ip >= srcLen) break;
     t = src[ip++];
     if (t < 16) {
-      let dist = 1 + (t >> 2) + (src[ip++] << 2);
-      let mpos = op - dist;
-      state = src[ip - 1] & 3;
-      dst[op++] = dst[mpos++];
-      dst[op++] = dst[mpos++];
-      while (state-- > 0) dst[op++] = src[ip++];
-      state = src[ip - 1] & 3;
-      if (state > 0) { t = src[ip++]; continue; }
+      if (ip >= srcLen) break;
+      let dist4 = 1 + (t >> 2) + (src[ip++] << 2);
+      let mpos4 = op - dist4;
+      if (mpos4 < 0) break;
+      if (op + 2 <= maxOutput) {
+        dst[op++] = dst[mpos4++];
+        dst[op++] = dst[mpos4++];
+      }
+      if (ip > 0) state = src[ip - 1] & 3;
+      let st = state;
+      while (st-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
+      if (ip > 0) state = src[ip - 1] & 3;
+      if (state > 0 && ip < srcLen) { t = src[ip++]; continue; }
+      if (ip >= srcLen) break;
       t = src[ip++];
     }
   }
@@ -1159,157 +1220,193 @@ function lzo1xDecompress(src, expectedSize) {
 }
 
 
-// --- PROCREATE FILE PARSER ---
-async function parseProcreateFile(arrayBuffer) {
-  const zip = await JSZip.loadAsync(arrayBuffer);
-  
-  // Parse Document.archive
-  const archiveFile = zip.file('Document.archive');
-  if (!archiveFile) throw new Error('No Document.archive found — not a valid .procreate file');
-  
-  const archiveData = await archiveFile.async('arraybuffer');
-  const plist = new BPlistParser(archiveData).parse();
-  const doc = decodeNSKeyedArchiver(plist);
-  const root = doc.root || Object.values(doc)[0];
-  
-  // Extract document info
-  let width, height;
-  
-  // Try different ways to get canvas size
-  if (root.size) {
-    if (typeof root.size === 'string') {
-      const match = root.size.match(/\{?\s*(\d+)\s*[,;]\s*(\d+)\s*\}?/);
-      if (match) { width = parseInt(match[1]); height = parseInt(match[2]); }
-    }
-  }
-  if (!width && root.SilicaDocumentArchiveDPIKey) {
-    // Look for orientation and size info
-  }
-  if (!width) {
-    // Try getting size from keys
-    const sizeKeys = ['ORKWidth', 'width', 'canvasWidth'];
-    const heightKeys = ['ORKHeight', 'height', 'canvasHeight'];
-    for (const k of sizeKeys) if (root[k]) width = root[k];
-    for (const k of heightKeys) if (root[k]) height = root[k];
-  }
+// --- PROCREATE FILE PARSER HELPERS ---
 
-  // Try columns/rows-based approach
-  if (!width && root.tileSize) {
-    tileSize = root.tileSize || 256;
-  }
-
-  // Get tile size
-  tileSize = root.tileSize || root['$objects']?.[0]?.tileSize || 256;
-  if (typeof tileSize !== 'number' || tileSize <= 0) tileSize = 256;
-
-  // Extract layer info from the archive
-  let layerDefs = extractLayers(root, plist['$objects'] || []);
-
-  // If we still don't have dimensions, try to infer from chunks
-  if (!width || !height) {
-    const dims = await inferDimensions(zip, layerDefs, tileSize);
-    width = dims.width;
-    height = dims.height;
-  }
-
-  // Get thumbnail
-  let thumbnail = null;
-  const thumbFile = zip.file('QuickLook/Thumbnail.png');
-  if (thumbFile) {
-    const thumbData = await thumbFile.async('blob');
-    thumbnail = URL.createObjectURL(thumbData);
-  }
-
-  return { zip, width, height, tileSize, layerDefs, thumbnail, root };
-}
-
-function extractLayers(root, objects) {
+function extractLayersFromObjects(objects) {
   const layerDefs = [];
+  const seenUUIDs = new Set();
   
-  // Find layers - they can be under various keys
-  let layerArray = root.unwrappedLayers || root.layers || root['SilicaDocumentArchiveLayers'];
-  
-  if (!layerArray && objects) {
-    // Search through objects for SilicaLayer instances
-    for (const obj of objects) {
-      if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-        if (obj['$class']) {
-          const classIdx = obj['$class']?.UID ?? obj['$class'];
-          const classObj = objects[classIdx];
-          if (classObj?.['$classname'] === 'SilicaLayer') {
-            layerDefs.push(extractLayerDef(obj, objects));
-          }
+  // First pass: find the SilicaDocumentArchiveLayers array for correct ordering
+  let layerOrder = null;
+  for (const obj of objects) {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) continue;
+    const layerRef = obj['SilicaDocumentArchiveLayers'] || obj.unwrappedLayers || obj.layers;
+    if (layerRef && typeof layerRef === 'object' && 'UID' in layerRef) {
+      const arrObj = objects[layerRef.UID];
+      if (arrObj && typeof arrObj === 'object') {
+        const items = arrObj['NS.objects'] || (Array.isArray(arrObj) ? arrObj : []);
+        if (Array.isArray(items) && items.length > 0) {
+          layerOrder = items.map(item => item?.UID ?? item).filter(x => typeof x === 'number');
+          break;
         }
       }
     }
   }
   
-  if (Array.isArray(layerArray)) {
-    for (const layer of layerArray) {
-      if (layer && typeof layer === 'object') {
-        layerDefs.push(extractLayerDef(layer, objects));
+  function extractFromIndex(idx) {
+    const obj = objects[idx];
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) return null;
+    return extractLayerFromRaw(obj, objects);
+  }
+  
+  // Use ordered list if available
+  if (layerOrder && layerOrder.length > 0) {
+    for (const idx of layerOrder) {
+      const def = extractFromIndex(idx);
+      if (def && def.uuid && !seenUUIDs.has(def.uuid)) {
+        seenUUIDs.add(def.uuid);
+        layerDefs.push(def);
+      } else if (def) {
+        layerDefs.push(def);
       }
     }
   }
-
+  
+  // Fallback: scan all objects for SilicaLayer class
+  if (layerDefs.length === 0) {
+    for (let i = 0; i < objects.length; i++) {
+      const obj = objects[i];
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) continue;
+      if (!obj['$class']) continue;
+      
+      const classIdx = obj['$class']?.UID ?? obj['$class'];
+      if (typeof classIdx !== 'number' || classIdx >= objects.length) continue;
+      const classObj = objects[classIdx];
+      const className = classObj?.['$classname'] || '';
+      
+      if (className === 'SilicaLayer') {
+        const def = extractLayerFromRaw(obj, objects);
+        if (def && def.uuid && !seenUUIDs.has(def.uuid)) {
+          seenUUIDs.add(def.uuid);
+          layerDefs.push(def);
+        } else if (def) {
+          layerDefs.push(def);
+        }
+      }
+    }
+  }
+  
   return layerDefs;
 }
 
-function extractLayerDef(layer, objects) {
-  return {
-    uuid: layer.UUID || layer.uuid || '',
-    name: layer.name || layer.Name || 'Untitled Layer',
-    opacity: layer.opacity ?? layer.extendedBlend ?? 1.0,
-    blend: layer.blend ?? layer.blendMode ?? 0,
-    hidden: layer.hidden ?? layer.isHidden ?? false,
-    clipped: layer.clipped ?? false,
-  };
+function extractLayerFromRaw(obj, objects) {
+  function resolveSimple(val) {
+    if (val && typeof val === 'object' && 'UID' in val) {
+      const ref = objects[val.UID];
+      if (ref === '$null') return null;
+      if (typeof ref === 'string' || typeof ref === 'number' || typeof ref === 'boolean') return ref;
+      if (ref && typeof ref === 'object' && ref['NS.string']) return ref['NS.string'];
+      return ref;
+    }
+    return val;
+  }
+
+  const uuid = resolveSimple(obj.UUID || obj.uuid) || '';
+  let name = resolveSimple(obj.name || obj.Name);
+  if (typeof name !== 'string') name = '';
+  
+  const opacity = typeof obj.opacity === 'number' ? obj.opacity 
+                : typeof obj.extendedBlend === 'number' ? obj.extendedBlend : 1.0;
+  const blend = typeof obj.blend === 'number' ? obj.blend 
+              : typeof obj.blendMode === 'number' ? obj.blendMode : 0;
+  const hidden = obj.hidden === true || obj.isHidden === true;
+  const clipped = obj.clipped === true;
+
+  return { uuid: String(uuid), name, opacity, blend, hidden, clipped };
+}
+
+async function loadThumbnailFromZip(zip) {
+  // Try multiple possible thumbnail paths
+  const thumbPaths = ['QuickLook/Thumbnail.png', 'QuickLook/thumbnail.png'];
+  
+  for (const path of thumbPaths) {
+    const thumbFile = zip.file(path);
+    if (!thumbFile) continue;
+    
+    try {
+      const thumbArray = await thumbFile.async('uint8array');
+      console.log('[Procreate Studio] Thumbnail data size:', thumbArray.length, 'bytes');
+      
+      // Method 1: createImageBitmap (most reliable)
+      try {
+        const blob = new Blob([thumbArray], { type: 'image/png' });
+        const bmp = await createImageBitmap(blob);
+        const canvas = document.createElement('canvas');
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        canvas.getContext('2d').drawImage(bmp, 0, 0);
+        console.log('[Procreate Studio] Thumbnail loaded via createImageBitmap:', bmp.width, 'x', bmp.height);
+        return canvas;
+      } catch (e) {
+        console.warn('[Procreate Studio] createImageBitmap failed, trying data URL...');
+      }
+      
+      // Method 2: data URL (fallback)
+      try {
+        let binary = '';
+        for (let i = 0; i < thumbArray.length; i++) binary += String.fromCharCode(thumbArray[i]);
+        const dataUrl = 'data:image/png;base64,' + btoa(binary);
+        const canvas = await loadImageToCanvas(dataUrl);
+        if (canvas) {
+          console.log('[Procreate Studio] Thumbnail loaded via data URL:', canvas.width, 'x', canvas.height);
+          return canvas;
+        }
+      } catch (e) {
+        console.warn('[Procreate Studio] Data URL fallback also failed:', e);
+      }
+    } catch (e) {
+      console.warn('[Procreate Studio] Could not read thumbnail file:', e);
+    }
+  }
+  
+  return null;
 }
 
 async function inferDimensions(zip, layerDefs, ts) {
   let maxCol = 0, maxRow = 0;
   
-  for (const layer of layerDefs) {
-    if (!layer.uuid) continue;
-    const folder = zip.folder(layer.uuid);
-    if (!folder) continue;
-    
-    folder.forEach((path) => {
-      const match = path.match(/(\d+)~(\d+)\.chunk$/);
-      if (match) {
-        maxCol = Math.max(maxCol, parseInt(match[1]) + 1);
-        maxRow = Math.max(maxRow, parseInt(match[2]) + 1);
-      }
-    });
-  }
-  
-  // Also check root level for UUIDs as folder names
-  if (maxCol === 0) {
-    zip.forEach((path, entry) => {
-      const match = path.match(/[^/]+\/(\d+)~(\d+)\.chunk$/);
-      if (match) {
-        maxCol = Math.max(maxCol, parseInt(match[1]) + 1);
-        maxRow = Math.max(maxRow, parseInt(match[2]) + 1);
-      }
-    });
-  }
+  // Scan ALL files in the zip for chunk patterns
+  zip.forEach((path, entry) => {
+    const match = path.match(/[^/]+\/(\d+)~(\d+)\.chunk$/);
+    if (match) {
+      maxCol = Math.max(maxCol, parseInt(match[1]) + 1);
+      maxRow = Math.max(maxRow, parseInt(match[2]) + 1);
+    }
+  });
 
-  // If still nothing, check for old-style numbered chunks
+  // If no chunks found at all, try to get from thumbnail
   if (maxCol === 0) {
-    zip.forEach((path, entry) => {
-      const match = path.match(/[^/]+\/(\d+)$/);
-      if (match) {
-        const idx = parseInt(match[1]);
-        // We need to figure out the grid — use thumbnail
-        maxCol = Math.max(maxCol, idx + 1);
+    const thumbFile = zip.file('QuickLook/Thumbnail.png');
+    if (thumbFile) {
+      try {
+        const thumbArray = await thumbFile.async('uint8array');
+        const thumbBlob = new Blob([thumbArray], { type: 'image/png' });
+        const bmp = await createImageBitmap(thumbBlob);
+        return { width: bmp.width, height: bmp.height };
+      } catch (e) {
+        console.warn('Could not determine size from thumbnail:', e);
       }
-    });
+    }
+    return { width: 2048, height: 2048 };
   }
 
   return {
-    width: maxCol * ts || 2048,
-    height: maxRow * ts || 2048
+    width: maxCol * ts,
+    height: maxRow * ts
   };
+}
+
+// Discover layer UUIDs from zip folder structure
+function discoverLayerUUIDs(zip) {
+  const uuids = new Set();
+  zip.forEach((path) => {
+    // Look for folders containing .chunk files
+    const match = path.match(/^([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})\/.*\.chunk$/i);
+    if (match) {
+      uuids.add(match[1]);
+    }
+  });
+  return [...uuids];
 }
 
 
@@ -1758,6 +1855,31 @@ function rgbToHex(r, g, b) {
 }
 
 
+// --- SAFE IMAGE LOADING ---
+function loadImageToCanvas(url) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        canvas.getContext('2d').drawImage(img, 0, 0);
+        resolve(canvas);
+      } catch (e) {
+        console.warn('Canvas draw failed:', e);
+        resolve(null);
+      }
+    };
+    img.onerror = (e) => {
+      console.warn('Image load failed for URL:', url?.substring(0, 60), e);
+      resolve(null); // resolve null instead of rejecting — prevents Event in catch
+    };
+    img.src = url;
+  });
+}
+
+
 // ========================================================================
 // UI LOGIC
 // ========================================================================
@@ -1798,33 +1920,132 @@ async function handleFile(file) {
   
   try {
     const arrayBuffer = await file.arrayBuffer();
-    setProgress(20);
-    setLoadingText('Parsing document structure...');
+    console.log('[Procreate Studio] File size:', arrayBuffer.byteLength, 'bytes');
+    setProgress(10);
     
-    procFile = await parseProcreateFile(arrayBuffer);
-    canvasWidth = procFile.width;
-    canvasHeight = procFile.height;
-    tileSize = procFile.tileSize;
+    // Step 1: Open as ZIP
+    setLoadingText('Opening ZIP archive...');
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    
+    // Log file structure
+    const zipFiles = [];
+    zip.forEach((path) => zipFiles.push(path));
+    console.log('[Procreate Studio] ZIP contents:', zipFiles.length, 'files');
+    console.log('[Procreate Studio] Files:', zipFiles.slice(0, 30).join(', '));
+    setProgress(20);
+    
+    // Step 2: Try to parse Document.archive
+    setLoadingText('Parsing document metadata...');
+    let width = 0, height = 0, ts = 256, layerDefs = [];
+    
+    const archiveFile = zip.file('Document.archive');
+    if (archiveFile) {
+      try {
+        const archiveData = await archiveFile.async('arraybuffer');
+        console.log('[Procreate Studio] Document.archive size:', archiveData.byteLength);
+        const plist = new BPlistParser(archiveData).parse();
+        console.log('[Procreate Studio] Binary plist parsed successfully');
+        
+        const decoder = decodeNSKeyedArchiver(plist);
+        const root = decoder.resolved.root || Object.values(decoder.resolved)[0] || {};
+        const objects = decoder.objects;
+        console.log('[Procreate Studio] NSKeyedArchiver decoded, objects count:', objects.length);
+        
+        // Extract dimensions
+        if (root.size) {
+          if (typeof root.size === 'string') {
+            const m = root.size.match(/\{?\s*(\d+)\s*[,;]\s*(\d+)\s*\}?/);
+            if (m) { width = parseInt(m[1]); height = parseInt(m[2]); }
+          }
+        }
+        if (!width) {
+          for (const obj of objects) {
+            if (obj && typeof obj === 'object' && !Array.isArray(obj) && !ArrayBuffer.isView(obj)) {
+              const w = obj['SilicaDocumentArchiveWidth'] || obj.width || obj.ORKWidth;
+              const h = obj['SilicaDocumentArchiveHeight'] || obj.height || obj.ORKHeight;
+              if (w && h && typeof w === 'number' && typeof h === 'number' && w > 100) {
+                width = w; height = h; break;
+              }
+            }
+          }
+        }
+        if (!width) {
+          for (const obj of objects) {
+            if (typeof obj === 'string') {
+              const m = obj.match(/\{?\s*(\d{3,})\s*,\s*(\d{3,})\s*\}?/);
+              if (m) { width = parseInt(m[1]); height = parseInt(m[2]); break; }
+            }
+          }
+        }
+        
+        // Extract tile size
+        for (const obj of objects) {
+          if (obj && typeof obj === 'object' && !Array.isArray(obj) && !ArrayBuffer.isView(obj)) {
+            const t = obj.tileSize || obj['tileSize'];
+            if (typeof t === 'number' && t > 0 && t <= 1024) { ts = t; break; }
+          }
+        }
+        
+        // Extract layers
+        layerDefs = extractLayersFromObjects(objects);
+        console.log('[Procreate Studio] Found', layerDefs.length, 'layer definitions');
+        layerDefs.forEach((d, i) => console.log(`  Layer ${i}: "${d.name}" uuid=${d.uuid?.substring(0,8)}...`));
+        
+      } catch (archiveErr) {
+        console.warn('[Procreate Studio] Document.archive parse failed:', archiveErr);
+      }
+    } else {
+      console.warn('[Procreate Studio] No Document.archive found');
+    }
+    
+    setProgress(35);
+    
+    // Step 3: Discover layer UUIDs from ZIP structure as fallback
+    const discoveredUUIDs = discoverLayerUUIDs(zip);
+    console.log('[Procreate Studio] Discovered UUIDs from ZIP:', discoveredUUIDs.length, discoveredUUIDs);
+    
+    if (layerDefs.length === 0 && discoveredUUIDs.length > 0) {
+      layerDefs = discoveredUUIDs.map((uuid, i) => ({
+        uuid, name: `Layer ${i + 1}`, opacity: 1, blend: 0, hidden: false, clipped: false
+      }));
+    } else if (layerDefs.length > 0 && layerDefs.every(d => !d.uuid) && discoveredUUIDs.length > 0) {
+      layerDefs.forEach((d, i) => { if (i < discoveredUUIDs.length) d.uuid = discoveredUUIDs[i]; });
+    }
+    
+    // Step 4: Infer dimensions from chunks if needed
+    if (!width || !height) {
+      const dims = await inferDimensions(zip, layerDefs, ts);
+      width = dims.width;
+      height = dims.height;
+    }
+    
+    canvasWidth = width;
+    canvasHeight = height;
+    tileSize = ts;
+    console.log('[Procreate Studio] Canvas:', canvasWidth, 'x', canvasHeight, 'tileSize:', tileSize);
     
     setProgress(40);
     setLoadingText('Loading layers...');
     
-    // Load each layer
+    // Step 5: Load each layer's pixel data
     layers = [];
-    const totalLayers = procFile.layerDefs.length;
-    
-    for (let i = 0; i < totalLayers; i++) {
-      const def = procFile.layerDefs[i];
-      setLoadingText(`Loading layer ${i + 1}/${totalLayers}: ${def.name}`);
-      setProgress(40 + (50 * (i / totalLayers)));
+    for (let i = 0; i < layerDefs.length; i++) {
+      const def = layerDefs[i];
+      setLoadingText(`Loading layer ${i + 1}/${layerDefs.length}: ${def.name || 'Layer ' + (i+1)}`);
+      setProgress(40 + (45 * (i / layerDefs.length)));
       
       let layerCanvas = null;
       let chunksLoaded = 0;
       
       if (def.uuid) {
-        const result = await loadLayer(procFile.zip, def, canvasWidth, canvasHeight, tileSize);
-        layerCanvas = result.canvas;
-        chunksLoaded = result.chunksLoaded;
+        try {
+          const result = await loadLayer(zip, def, canvasWidth, canvasHeight, tileSize);
+          layerCanvas = result.canvas;
+          chunksLoaded = result.chunksLoaded;
+          console.log(`[Procreate Studio] Layer "${def.name}": ${chunksLoaded} chunks loaded`);
+        } catch (e) {
+          console.warn(`[Procreate Studio] Failed to load layer "${def.name}":`, e);
+        }
       }
       
       layers.push({
@@ -1837,37 +2058,27 @@ async function handleFile(file) {
       });
     }
     
-    // If no layer data loaded, try using thumbnail
-    if (layers.every(l => l.chunksLoaded === 0) && procFile.thumbnail) {
-      setLoadingText('Using thumbnail preview...');
-      const img = new Image();
-      await new Promise((resolve, reject) => {
-        img.onload = resolve;
-        img.onerror = reject;
-        img.src = procFile.thumbnail;
-      });
-      canvasWidth = img.naturalWidth;
-      canvasHeight = img.naturalHeight;
-      
-      const thumbCanvas = document.createElement('canvas');
-      thumbCanvas.width = canvasWidth;
-      thumbCanvas.height = canvasHeight;
-      thumbCanvas.getContext('2d').drawImage(img, 0, 0);
-      
-      if (layers.length === 0) {
-        layers.push({
-          name: 'Thumbnail Preview',
-          uuid: '',
-          opacity: 1,
-          blend: 0,
-          hidden: false,
-          clipped: false,
-          canvas: thumbCanvas,
-          visible: true,
-          selected: true,
-          chunksLoaded: 1,
-          index: 0
-        });
+    // Step 6: If no layer data loaded, use thumbnail
+    if (layers.every(l => l.chunksLoaded === 0)) {
+      console.log('[Procreate Studio] No chunk data loaded, trying thumbnail...');
+      const thumbCanvas = await loadThumbnailFromZip(zip);
+      if (thumbCanvas) {
+        canvasWidth = thumbCanvas.width;
+        canvasHeight = thumbCanvas.height;
+        if (layers.length === 0) {
+          layers.push({
+            name: 'Thumbnail Preview',
+            uuid: '', opacity: 1, blend: 0, hidden: false, clipped: false,
+            canvas: thumbCanvas, visible: true, selected: true, chunksLoaded: 1, index: 0
+          });
+        } else {
+          // Assign thumbnail to first layer so we see something
+          layers[0].canvas = thumbCanvas;
+          layers[0].chunksLoaded = 1;
+        }
+        console.log('[Procreate Studio] Thumbnail loaded:', canvasWidth, 'x', canvasHeight);
+      } else {
+        console.warn('[Procreate Studio] No thumbnail available either');
       }
     }
 
@@ -1889,17 +2100,39 @@ async function handleFile(file) {
     setProgress(100);
     hideLoading();
     
-    showToast(`Loaded ${layers.length} layers (${canvasWidth}×${canvasHeight})`);
+    const loadedCount = layers.filter(l => l.chunksLoaded > 0).length;
+    showToast(`Loaded ${layers.length} layers (${loadedCount} with data) — ${canvasWidth}×${canvasHeight}`);
     
   } catch (err) {
-    console.error('Parse error:', err);
-    hideLoading();
-    showToast('Error: ' + err.message);
+    console.error('[Procreate Studio] Fatal error:', err);
+    const errMsg = err?.message || String(err);
     
-    // Try thumbnail fallback
-    if (procFile?.thumbnail) {
-      showToast('Falling back to thumbnail preview');
+    // Last resort: try just loading thumbnail directly from the file
+    try {
+      const zip2 = await JSZip.loadAsync(await file.arrayBuffer());
+      const thumbCanvas = await loadThumbnailFromZip(zip2);
+      if (thumbCanvas) {
+        canvasWidth = thumbCanvas.width;
+        canvasHeight = thumbCanvas.height;
+        layers = [{
+          name: 'Thumbnail Preview (parse failed)',
+          uuid: '', opacity: 1, blend: 0, hidden: false, clipped: false,
+          canvas: thumbCanvas, visible: true, selected: true, chunksLoaded: 1, index: 0
+        }];
+        buildLayerList();
+        renderView();
+        extractAndShowPalette();
+        updateStatus();
+        hideLoading();
+        showToast('Showing thumbnail — layer parse failed: ' + errMsg);
+        return;
+      }
+    } catch (e2) {
+      console.error('[Procreate Studio] Thumbnail fallback also failed:', e2);
     }
+    
+    hideLoading();
+    showToast('Error: ' + errMsg);
   }
 }
 
