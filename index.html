@@ -1226,78 +1226,134 @@ function extractLayersFromObjects(objects) {
   const layerDefs = [];
   const seenUUIDs = new Set();
   
-  // First pass: find the SilicaDocumentArchiveLayers array for correct ordering
-  let layerOrder = null;
+  // Helper: get class name for an object index
+  function getClassNameForIndex(idx) {
+    const obj = objects[idx];
+    if (!obj || typeof obj !== 'object' || !obj['$class']) return '';
+    const classIdx = obj['$class']?.UID ?? obj['$class'];
+    if (typeof classIdx !== 'number' || classIdx >= objects.length) return '';
+    return objects[classIdx]?.['$classname'] || '';
+  }
+  
+  // Helper: resolve an NSArray UID to an array of object indices
+  function resolveArray(ref) {
+    if (!ref) return [];
+    const idx = ref?.UID ?? ref;
+    if (typeof idx !== 'number' || idx >= objects.length) return [];
+    const arrObj = objects[idx];
+    if (!arrObj || typeof arrObj !== 'object') return [];
+    const items = arrObj['NS.objects'] || (Array.isArray(arrObj) ? arrObj : []);
+    if (!Array.isArray(items)) return [];
+    return items.map(item => item?.UID ?? item).filter(x => typeof x === 'number');
+  }
+  
+  // Recursive function: extract layers from a given object index
+  // If it's a SilicaGroup, drill into children; if SilicaLayer, extract it
+  function extractRecursive(idx, depth, groupName) {
+    if (typeof idx !== 'number' || idx >= objects.length) return;
+    const obj = objects[idx];
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) return;
+    
+    const className = getClassNameForIndex(idx);
+    
+    if (className === 'SilicaGroup' || className.includes('Group')) {
+      // It's a group — get its name and drill into children
+      const def = extractLayerFromRaw(obj, objects);
+      const gName = def.name || groupName || 'Group';
+      console.log(`[Procreate Studio] ${'  '.repeat(depth)}Group: "${gName}" (children...)`);
+      
+      // Find children array
+      const childrenRef = obj.children || obj['NS.objects'];
+      const childIndices = resolveArray(childrenRef);
+      
+      if (childIndices.length > 0) {
+        for (const childIdx of childIndices) {
+          extractRecursive(childIdx, depth + 1, gName);
+        }
+      } else {
+        // Group has no children but might have its own UUID with chunk data
+        // (Procreate flattens single-layer groups sometimes)
+        if (def.uuid && !seenUUIDs.has(def.uuid)) {
+          def.name = gName;
+          def.isGroup = true;
+          seenUUIDs.add(def.uuid);
+          layerDefs.push(def);
+          console.log(`[Procreate Studio] ${'  '.repeat(depth)}  → Group has UUID, adding as layer: "${gName}"`);
+        }
+      }
+    } else if (className === 'SilicaLayer' || className.includes('Layer')) {
+      // It's a regular layer — extract it
+      const def = extractLayerFromRaw(obj, objects);
+      if (def.uuid && !seenUUIDs.has(def.uuid)) {
+        seenUUIDs.add(def.uuid);
+        layerDefs.push(def);
+      } else if (def.uuid) {
+        // Duplicate UUID — still add with a suffix
+        layerDefs.push(def);
+      } else {
+        layerDefs.push(def);
+      }
+      console.log(`[Procreate Studio] ${'  '.repeat(depth)}Layer: "${def.name}" uuid=${def.uuid?.substring(0,12) || '(none)'}...`);
+    } else {
+      // Unknown class — could be a layer, try to extract
+      if (obj.UUID || obj.uuid) {
+        const def = extractLayerFromRaw(obj, objects);
+        if (def.uuid) {
+          // Check if it has children (might be a group-like thing)
+          const childrenRef = obj.children || obj['NS.objects'];
+          const childIndices = resolveArray(childrenRef);
+          if (childIndices.length > 0) {
+            for (const childIdx of childIndices) {
+              extractRecursive(childIdx, depth + 1, def.name);
+            }
+          } else if (!seenUUIDs.has(def.uuid)) {
+            seenUUIDs.add(def.uuid);
+            layerDefs.push(def);
+            console.log(`[Procreate Studio] ${'  '.repeat(depth)}Unknown(${className}): "${def.name}" uuid=${def.uuid?.substring(0,12)}...`);
+          }
+        }
+      }
+    }
+  }
+  
+  // Step 1: Find the top-level layers array
+  let topLevelIndices = null;
   for (const obj of objects) {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) continue;
     const layerRef = obj['SilicaDocumentArchiveLayers'] || obj.unwrappedLayers || obj.layers;
-    if (layerRef && typeof layerRef === 'object' && 'UID' in layerRef) {
-      const arrObj = objects[layerRef.UID];
-      if (arrObj && typeof arrObj === 'object') {
-        const items = arrObj['NS.objects'] || (Array.isArray(arrObj) ? arrObj : []);
-        if (Array.isArray(items) && items.length > 0) {
-          layerOrder = items.map(item => item?.UID ?? item).filter(x => typeof x === 'number');
-          break;
-        }
+    if (layerRef) {
+      topLevelIndices = resolveArray(layerRef);
+      if (topLevelIndices.length > 0) {
+        console.log('[Procreate Studio] Found top-level layers array with', topLevelIndices.length, 'entries');
+        break;
       }
     }
   }
   
-  function extractFromIndex(idx) {
-    const obj = objects[idx];
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) return null;
-    return extractLayerFromRaw(obj, objects);
-  }
-  
-  // Use ordered list if available
-  if (layerOrder && layerOrder.length > 0) {
-    for (const idx of layerOrder) {
-      const def = extractFromIndex(idx);
-      if (def && def.uuid && !seenUUIDs.has(def.uuid)) {
-        seenUUIDs.add(def.uuid);
-        layerDefs.push(def);
-      } else if (def) {
-        layerDefs.push(def);
-      }
+  // Step 2: Recursively extract from top-level entries
+  if (topLevelIndices && topLevelIndices.length > 0) {
+    for (const idx of topLevelIndices) {
+      extractRecursive(idx, 0, '');
     }
   }
   
-  // Fallback: scan all objects for SilicaLayer class
+  // Step 3: Fallback — scan all objects for SilicaLayer class directly
   if (layerDefs.length === 0) {
-    let debuggedFirst = false;
+    console.log('[Procreate Studio] No layers from recursive extraction, scanning all objects...');
     for (let i = 0; i < objects.length; i++) {
-      const obj = objects[i];
-      if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) continue;
-      if (!obj['$class']) continue;
-      
-      const classIdx = obj['$class']?.UID ?? obj['$class'];
-      if (typeof classIdx !== 'number' || classIdx >= objects.length) continue;
-      const classObj = objects[classIdx];
-      const className = classObj?.['$classname'] || '';
-      
+      const className = getClassNameForIndex(i);
       if (className === 'SilicaLayer') {
-        // Debug: dump first layer's raw keys
-        if (!debuggedFirst) {
-          debuggedFirst = true;
-          console.log('[Procreate Studio] First SilicaLayer raw keys:', Object.keys(obj));
-          for (const [k, v] of Object.entries(obj)) {
-            if (k === '$class') continue;
-            const type = ArrayBuffer.isView(v) ? `Uint8Array(${v.length})` 
-                       : v && typeof v === 'object' && 'UID' in v ? `UID(${v.UID})`
-                       : typeof v;
-            console.log(`  ${k}: ${type} = ${String(v).substring(0, 60)}`);
-          }
-        }
-        
+        const obj = objects[i];
         const def = extractLayerFromRaw(obj, objects);
-        if (def && def.uuid && !seenUUIDs.has(def.uuid)) {
+        if (def.uuid && !seenUUIDs.has(def.uuid)) {
           seenUUIDs.add(def.uuid);
           layerDefs.push(def);
-        } else if (def) {
+        } else if (!def.uuid) {
           layerDefs.push(def);
         }
       }
     }
+    console.log('[Procreate Studio] Direct scan found', layerDefs.length, 'SilicaLayer objects');
   }
   
   return layerDefs;
@@ -2261,6 +2317,9 @@ async function handleFile(file) {
     // Render composite
     renderView();
     
+    // Fit canvas to viewport
+    setTimeout(() => zoomCanvas(0), 50);
+    
     // Extract color palette
     extractAndShowPalette();
     
@@ -2443,17 +2502,22 @@ function renderView() {
 
 // --- ZOOM ---
 function zoomCanvas(dir) {
+  if (!canvasWidth || !canvasHeight) return; // Not loaded yet
+  
   if (dir === 0) {
     // Fit
     const viewport = document.getElementById('canvasViewport');
     const vw = viewport.clientWidth - 48;
     const vh = viewport.clientHeight - 48;
-    zoomFactor = Math.min(vw / canvasWidth, vh / canvasHeight, 1);
+    if (vw <= 0 || vh <= 0) { zoomFactor = 1; }
+    else { zoomFactor = Math.min(vw / canvasWidth, vh / canvasHeight, 1); }
   } else if (dir > 0) {
     zoomFactor = Math.min(zoomFactor * 1.25, 5);
   } else {
     zoomFactor = Math.max(zoomFactor * 0.8, 0.1);
   }
+  
+  if (!isFinite(zoomFactor) || zoomFactor <= 0) zoomFactor = 1;
   
   const container = document.getElementById('canvasContainer');
   container.style.width = (canvasWidth * zoomFactor) + 'px';
@@ -2799,7 +2863,7 @@ function resetApp() {
 }
 
 // Init zoom on first render
-setTimeout(() => zoomCanvas(0), 100);
+// zoomCanvas(0) is called after file load in handleFile, not on page init
 </script>
 </body>
 </html>
