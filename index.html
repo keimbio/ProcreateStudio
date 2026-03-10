@@ -1264,6 +1264,7 @@ function extractLayersFromObjects(objects) {
   
   // Fallback: scan all objects for SilicaLayer class
   if (layerDefs.length === 0) {
+    let debuggedFirst = false;
     for (let i = 0; i < objects.length; i++) {
       const obj = objects[i];
       if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) continue;
@@ -1275,6 +1276,19 @@ function extractLayersFromObjects(objects) {
       const className = classObj?.['$classname'] || '';
       
       if (className === 'SilicaLayer') {
+        // Debug: dump first layer's raw keys
+        if (!debuggedFirst) {
+          debuggedFirst = true;
+          console.log('[Procreate Studio] First SilicaLayer raw keys:', Object.keys(obj));
+          for (const [k, v] of Object.entries(obj)) {
+            if (k === '$class') continue;
+            const type = ArrayBuffer.isView(v) ? `Uint8Array(${v.length})` 
+                       : v && typeof v === 'object' && 'UID' in v ? `UID(${v.UID})`
+                       : typeof v;
+            console.log(`  ${k}: ${type} = ${String(v).substring(0, 60)}`);
+          }
+        }
+        
         const def = extractLayerFromRaw(obj, objects);
         if (def && def.uuid && !seenUUIDs.has(def.uuid)) {
           seenUUIDs.add(def.uuid);
@@ -1295,15 +1309,102 @@ function extractLayerFromRaw(obj, objects) {
       const ref = objects[val.UID];
       if (ref === '$null') return null;
       if (typeof ref === 'string' || typeof ref === 'number' || typeof ref === 'boolean') return ref;
-      if (ref && typeof ref === 'object' && ref['NS.string']) return ref['NS.string'];
+      if (ref && typeof ref === 'object') {
+        // Handle NSString
+        if (ref['NS.string']) return ref['NS.string'];
+        // Handle NSUUID — stored as NS.uuidbytes (16-byte data)
+        if (ref['NS.uuidbytes'] || ref['NS.data']) {
+          const data = ref['NS.uuidbytes'] || ref['NS.data'];
+          if (data && typeof data === 'object' && 'UID' in data) {
+            const innerData = objects[data.UID];
+            if (innerData instanceof Uint8Array || ArrayBuffer.isView(innerData)) {
+              return bytesToUUID(innerData);
+            }
+          }
+          if (data instanceof Uint8Array || ArrayBuffer.isView(data)) {
+            return bytesToUUID(data);
+          }
+        }
+        // Try to get class name and handle accordingly
+        if (ref['$class']) {
+          const classIdx = ref['$class']?.UID ?? ref['$class'];
+          if (typeof classIdx === 'number' && classIdx < objects.length) {
+            const cls = objects[classIdx];
+            const clsName = cls?.['$classname'] || '';
+            if (clsName.includes('UUID') || clsName.includes('uuid')) {
+              // Try to find bytes
+              for (const [k, v] of Object.entries(ref)) {
+                if (k.startsWith('$')) continue;
+                if (v instanceof Uint8Array || ArrayBuffer.isView(v)) {
+                  return bytesToUUID(v);
+                }
+                if (v && typeof v === 'object' && 'UID' in v) {
+                  const inner = objects[v.UID];
+                  if (inner instanceof Uint8Array || ArrayBuffer.isView(inner)) {
+                    return bytesToUUID(inner);
+                  }
+                }
+              }
+            }
+            if (clsName.includes('String')) {
+              return ref['NS.string'] || '';
+            }
+          }
+        }
+      }
       return ref;
     }
     return val;
   }
 
-  const uuid = resolveSimple(obj.UUID || obj.uuid) || '';
+  let uuid = resolveSimple(obj.UUID || obj.uuid);
+  
+  // If uuid resolved to raw bytes (Uint8Array of 16 bytes = UUID), convert to string
+  if (ArrayBuffer.isView(uuid) || uuid instanceof Uint8Array) {
+    if (uuid.length === 16) {
+      uuid = bytesToUUID(uuid);
+    } else {
+      // Might be a string encoded as bytes
+      try { uuid = new TextDecoder().decode(uuid); } catch(e) { uuid = ''; }
+    }
+  }
+  // If uuid is still a non-string object, try to dig out UUID bytes
+  if (uuid && typeof uuid === 'object' && !ArrayBuffer.isView(uuid)) {
+    console.warn('[Procreate Studio] UUID resolved to object, keys:', Object.keys(uuid));
+    let found = false;
+    for (const [k, v] of Object.entries(uuid)) {
+      if (k === '$class') continue;
+      if ((ArrayBuffer.isView(v) || v instanceof Uint8Array) && v.length === 16) {
+        uuid = bytesToUUID(v);
+        found = true;
+        break;
+      }
+      // One more level of UID indirection
+      if (v && typeof v === 'object' && 'UID' in v) {
+        const inner = objects[v.UID];
+        if ((ArrayBuffer.isView(inner) || inner instanceof Uint8Array) && inner.length === 16) {
+          uuid = bytesToUUID(inner);
+          found = true;
+          break;
+        }
+      }
+    }
+    if (!found) uuid = '';
+  }
+  uuid = uuid ? String(uuid).trim() : '';
+  
   let name = resolveSimple(obj.name || obj.Name);
+  if (name && typeof name === 'object') name = '';
   if (typeof name !== 'string') name = '';
+  
+  // Debug: log first few UUIDs extracted
+  if (!extractLayerFromRaw._debugCount) extractLayerFromRaw._debugCount = 0;
+  if (extractLayerFromRaw._debugCount < 5) {
+    const rawUUID = obj.UUID || obj.uuid;
+    const rawType = rawUUID ? (rawUUID.UID !== undefined ? `UID(${rawUUID.UID})` : typeof rawUUID) : 'missing';
+    console.log(`[Procreate Studio] UUID extraction #${extractLayerFromRaw._debugCount}: raw=${rawType} → resolved="${uuid.substring(0,20)}${uuid.length > 20 ? '...' : ''}" name="${name || '?'}"`);
+    extractLayerFromRaw._debugCount++;
+  }
   
   const opacity = typeof obj.opacity === 'number' ? obj.opacity 
                 : typeof obj.extendedBlend === 'number' ? obj.extendedBlend : 1.0;
@@ -1312,7 +1413,14 @@ function extractLayerFromRaw(obj, objects) {
   const hidden = obj.hidden === true || obj.isHidden === true;
   const clipped = obj.clipped === true;
 
-  return { uuid: String(uuid), name, opacity, blend, hidden, clipped };
+  return { uuid, name, opacity, blend, hidden, clipped };
+}
+
+// Convert 16 raw bytes to UUID string format
+function bytesToUUID(bytes) {
+  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  if (hex.length < 32) return hex;
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`.toUpperCase();
 }
 
 async function loadThumbnailFromZip(zip) {
@@ -1396,17 +1504,22 @@ async function inferDimensions(zip, layerDefs, ts) {
   };
 }
 
-// Discover layer UUIDs from zip folder structure
+// Discover layer folders from zip that contain .chunk files
 function discoverLayerUUIDs(zip) {
-  const uuids = new Set();
+  const folders = new Set();
   zip.forEach((path) => {
-    // Look for folders containing .chunk files
-    const match = path.match(/^([0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12})\/.*\.chunk$/i);
+    // Match any folder containing .chunk files (but not QuickLook or video)
+    const match = path.match(/^([^/]+)\/.*\.chunk$/);
     if (match) {
-      uuids.add(match[1]);
+      const folder = match[1];
+      if (folder !== 'QuickLook' && folder !== 'video' && folder !== 'segments') {
+        folders.add(folder);
+      }
     }
   });
-  return [...uuids];
+  const result = [...folders];
+  console.log('[Procreate Studio] Discovered', result.length, 'chunk folders:', result.map(f => f.substring(0,12)+'...'));
+  return result;
 }
 
 
@@ -1567,27 +1680,36 @@ function getBlendMode(blend) {
 
 // --- COLOR PALETTE EXTRACTION ---
 function extractPalette(canvas, numColors = 25) {
-  const ctx = canvas.getContext('2d');
-  // Sample at reduced resolution for performance
-  const sampleSize = 200;
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = sampleSize;
-  tempCanvas.height = sampleSize;
-  const tctx = tempCanvas.getContext('2d');
-  tctx.drawImage(canvas, 0, 0, sampleSize, sampleSize);
-  const data = tctx.getImageData(0, 0, sampleSize, sampleSize).data;
+  if (!canvas || canvas.width === 0 || canvas.height === 0) return [];
   
-  // Collect non-transparent pixels
-  const pixels = [];
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] < 128) continue; // skip transparent
-    pixels.push([data[i], data[i + 1], data[i + 2]]);
+  try {
+    // Sample at reduced resolution for performance
+    const sampleSize = Math.min(300, canvas.width, canvas.height);
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = sampleSize;
+    tempCanvas.height = sampleSize;
+    const tctx = tempCanvas.getContext('2d');
+    tctx.drawImage(canvas, 0, 0, sampleSize, sampleSize);
+    const data = tctx.getImageData(0, 0, sampleSize, sampleSize).data;
+    
+    // Collect non-transparent pixels (lower threshold to catch semi-transparent)
+    const pixels = [];
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] < 20) continue; // skip nearly transparent
+      pixels.push([data[i], data[i + 1], data[i + 2]]);
+    }
+    
+    console.log('[Procreate Studio] Palette sampling:', pixels.length, 'opaque pixels from', sampleSize, 'x', sampleSize, 'sample');
+    
+    if (pixels.length === 0) return [];
+    if (pixels.length < numColors) numColors = Math.max(1, pixels.length);
+    
+    // K-means clustering for palette extraction
+    return kMeansColors(pixels, numColors, 15);
+  } catch (e) {
+    console.error('[Procreate Studio] extractPalette error:', e);
+    return [];
   }
-  
-  if (pixels.length === 0) return [];
-  
-  // K-means clustering for palette extraction
-  return kMeansColors(pixels, numColors, 15);
 }
 
 function kMeansColors(pixels, k, iterations) {
@@ -2000,16 +2122,64 @@ async function handleFile(file) {
     
     setProgress(35);
     
-    // Step 3: Discover layer UUIDs from ZIP structure as fallback
-    const discoveredUUIDs = discoverLayerUUIDs(zip);
-    console.log('[Procreate Studio] Discovered UUIDs from ZIP:', discoveredUUIDs.length, discoveredUUIDs);
+    // Step 3: Discover chunk folders from ZIP structure
+    const discoveredFolders = discoverLayerUUIDs(zip);
+    console.log('[Procreate Studio] Discovered chunk folders from ZIP:', discoveredFolders.length, discoveredFolders);
     
-    if (layerDefs.length === 0 && discoveredUUIDs.length > 0) {
-      layerDefs = discoveredUUIDs.map((uuid, i) => ({
+    // Step 3b: Reconcile layer defs with zip folders
+    if (layerDefs.length === 0 && discoveredFolders.length > 0) {
+      // No layers from archive, create from zip folders
+      layerDefs = discoveredFolders.map((uuid, i) => ({
         uuid, name: `Layer ${i + 1}`, opacity: 1, blend: 0, hidden: false, clipped: false
       }));
-    } else if (layerDefs.length > 0 && layerDefs.every(d => !d.uuid) && discoveredUUIDs.length > 0) {
-      layerDefs.forEach((d, i) => { if (i < discoveredUUIDs.length) d.uuid = discoveredUUIDs[i]; });
+    } else if (layerDefs.length > 0) {
+      // Build a case-insensitive lookup of zip folders
+      const folderLookup = new Map();
+      const usedFolders = new Set();
+      for (const f of discoveredFolders) {
+        folderLookup.set(f.toUpperCase(), f);
+      }
+      
+      // Match each layer def's UUID to a zip folder
+      for (const def of layerDefs) {
+        if (def.uuid) {
+          const upper = def.uuid.toUpperCase();
+          // Exact case-insensitive match
+          if (folderLookup.has(upper)) {
+            const matched = folderLookup.get(upper);
+            def.uuid = matched; // Use exact folder name from zip
+            usedFolders.add(matched);
+            continue;
+          }
+          // Try without dashes (some formats differ)
+          const noDash = upper.replace(/-/g, '');
+          for (const [key, val] of folderLookup) {
+            if (key.replace(/-/g, '') === noDash) {
+              def.uuid = val;
+              usedFolders.add(val);
+              break;
+            }
+          }
+        }
+      }
+      
+      // For layers with no UUID, assign remaining unmatched folders in order
+      const unmatchedFolders = discoveredFolders.filter(f => !usedFolders.has(f));
+      let unmatchedIdx = 0;
+      for (const def of layerDefs) {
+        if (!def.uuid || !discoveredFolders.includes(def.uuid)) {
+          if (unmatchedIdx < unmatchedFolders.length) {
+            console.log(`[Procreate Studio] Assigning unmatched folder "${unmatchedFolders[unmatchedIdx]}" to layer "${def.name}"`);
+            def.uuid = unmatchedFolders[unmatchedIdx++];
+          }
+        }
+      }
+      
+      console.log('[Procreate Studio] After reconciliation:');
+      layerDefs.forEach((d, i) => {
+        const inZip = discoveredFolders.includes(d.uuid);
+        console.log(`  Layer ${i}: "${d.name}" uuid=${d.uuid?.substring(0,12)}... inZip=${inZip}`);
+      });
     }
     
     // Step 4: Infer dimensions from chunks if needed
@@ -2216,6 +2386,9 @@ function buildLayerList() {
     
     list.appendChild(el);
   });
+  
+  // Always update status bar when layer list is rebuilt
+  try { updateStatus(); } catch(e) {}
 }
 
 function getBlendModeName(blend) {
@@ -2474,20 +2647,51 @@ function downloadBlob(blob, filename) {
 
 // --- PALETTE ---
 function extractAndShowPalette() {
-  const compositeCanvas = document.createElement('canvas');
-  compositeCanvas.width = canvasWidth;
-  compositeCanvas.height = canvasHeight;
-  const ctx = compositeCanvas.getContext('2d');
-  
-  const visible = layers.filter(l => l.visible);
-  for (let i = visible.length - 1; i >= 0; i--) {
-    if (!visible[i].canvas) continue;
-    ctx.globalAlpha = visible[i].opacity ?? 1;
-    ctx.drawImage(visible[i].canvas, 0, 0);
+  try {
+    // Create a clean composite (no transparency grid)
+    const sourceCanvas = document.createElement('canvas');
+    sourceCanvas.width = canvasWidth || 100;
+    sourceCanvas.height = canvasHeight || 100;
+    const ctx = sourceCanvas.getContext('2d');
+    
+    const visible = layers.filter(l => l.visible && l.canvas);
+    console.log('[Procreate Studio] Palette: compositing', visible.length, 'visible layers onto', sourceCanvas.width, 'x', sourceCanvas.height);
+    
+    for (let i = visible.length - 1; i >= 0; i--) {
+      ctx.globalAlpha = visible[i].opacity ?? 1;
+      ctx.globalCompositeOperation = getBlendMode(visible[i].blend);
+      ctx.drawImage(visible[i].canvas, 0, 0);
+    }
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    
+    palette = extractPalette(sourceCanvas, 25);
+    
+    // Fallback: if no colors from composite, try from main canvas directly
+    if (palette.length === 0) {
+      console.log('[Procreate Studio] Palette: no colors from composite, trying main canvas...');
+      const mainCanvas = document.getElementById('mainCanvas');
+      if (mainCanvas && mainCanvas.width > 0) {
+        palette = extractPalette(mainCanvas, 25);
+      }
+    }
+    
+    // Fallback 2: try each layer individually
+    if (palette.length === 0 && visible.length > 0) {
+      console.log('[Procreate Studio] Palette: trying individual layers...');
+      for (const l of visible) {
+        palette = extractPalette(l.canvas, 25);
+        if (palette.length > 0) break;
+      }
+    }
+    
+    console.log('[Procreate Studio] Extracted palette colors:', palette.length);
+    showPalette();
+  } catch (e) {
+    console.error('[Procreate Studio] Palette extraction failed:', e);
+    palette = [];
+    showPalette();
   }
-  
-  palette = extractPalette(compositeCanvas, 25);
-  showPalette();
 }
 
 function showPalette() {
