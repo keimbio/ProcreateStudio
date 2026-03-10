@@ -804,1287 +804,271 @@ body {
 
 <script>
 // ========================================================================
-// PROCREATE STUDIO — Complete .procreate File Parser & Viewer
+// PROCREATE STUDIO v2 — ZIP-first approach
+// Instead of parsing the complex NSKeyedArchiver plist, we scan the ZIP
+// directly: every folder with .chunk files = one layer.
 // ========================================================================
 
-// --- STATE ---
-let procFile = null;  // parsed procreate file data
-let layers = [];      // array of { name, uuid, opacity, blend, hidden, visible, selected, canvas }
+let procFile = null;
+let layers = [];
 let currentView = 'composite';
 let selectedFormat = 'png';
 let zoomFactor = 1;
 let palette = [];
 let canvasWidth = 0, canvasHeight = 0, tileSize = 256;
 
-// --- BINARY PLIST PARSER ---
-class BPlistParser {
-  constructor(buffer) {
-    this.buffer = buffer;
-    this.view = new DataView(buffer);
-    this.bytes = new Uint8Array(buffer);
-  }
-
-  parse() {
-    const magic = String.fromCharCode(...this.bytes.slice(0, 8));
-    if (!magic.startsWith('bplist')) throw new Error('Not a binary plist');
-    
-    const trailerStart = this.buffer.byteLength - 32;
-    // skip 6 unused bytes
-    this.offsetSize = this.view.getUint8(trailerStart + 6);
-    this.objectRefSize = this.view.getUint8(trailerStart + 7);
-    this.numObjects = Number(this.view.getBigUint64(trailerStart + 8));
-    this.topObjectIndex = Number(this.view.getBigUint64(trailerStart + 16));
-    this.offsetTableOffset = Number(this.view.getBigUint64(trailerStart + 24));
-    
-    this.offsets = [];
-    for (let i = 0; i < this.numObjects; i++) {
-      this.offsets.push(this.readSizedInt(
-        this.offsetTableOffset + i * this.offsetSize, 
-        this.offsetSize
-      ));
-    }
-    
-    return this.parseObject(this.topObjectIndex);
-  }
-
-  readSizedInt(offset, size) {
-    let val = 0;
-    for (let i = 0; i < size; i++) {
-      val = val * 256 + this.bytes[offset + i];
-    }
-    return val;
-  }
-
-  parseObject(index) {
-    if (index >= this.numObjects) return null;
-    const offset = this.offsets[index];
-    const marker = this.bytes[offset];
-    const type = (marker & 0xF0) >> 4;
-    let size = marker & 0x0F;
-    let pos = offset + 1;
-
-    switch (type) {
-      case 0x0: // null, bool, fill
-        if (size === 0) return null;
-        if (size === 8) return false;
-        if (size === 9) return true;
-        return null;
-
-      case 0x1: { // int
-        const byteCount = 1 << size;
-        if (byteCount <= 4) {
-          let val = 0;
-          for (let i = 0; i < byteCount; i++) val = val * 256 + this.bytes[pos + i];
-          return val;
-        }
-        let val = BigInt(0);
-        for (let i = 0; i < byteCount; i++) val = val * 256n + BigInt(this.bytes[pos + i]);
-        return Number(val);
-      }
-
-      case 0x2: { // float
-        if (size === 2) return this.view.getFloat32(pos);
-        if (size === 3) return this.view.getFloat64(pos);
-        return 0;
-      }
-
-      case 0x3: { // date
-        return new Date(978307200000 + this.view.getFloat64(pos) * 1000);
-      }
-
-      case 0x4: { // data
-        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
-        return this.bytes.slice(pos, pos + size);
-      }
-
-      case 0x5: { // ascii string
-        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
-        return String.fromCharCode(...this.bytes.slice(pos, pos + size));
-      }
-
-      case 0x6: { // unicode string
-        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
-        let str = '';
-        for (let i = 0; i < size; i++) {
-          str += String.fromCharCode(this.view.getUint16(pos + i * 2));
-        }
-        return str;
-      }
-
-      case 0x8: { // uid
-        const uidSize = size + 1;
-        let val = 0;
-        for (let i = 0; i < uidSize; i++) val = val * 256 + this.bytes[pos + i];
-        return { UID: val };
-      }
-
-      case 0xA: { // array
-        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
-        const arr = [];
-        for (let i = 0; i < size; i++) {
-          const ref = this.readSizedInt(pos + i * this.objectRefSize, this.objectRefSize);
-          arr.push(this.parseObject(ref));
-        }
-        return arr;
-      }
-
-      case 0xC: { // set (treat as array)
-        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
-        const arr = [];
-        for (let i = 0; i < size; i++) {
-          const ref = this.readSizedInt(pos + i * this.objectRefSize, this.objectRefSize);
-          arr.push(this.parseObject(ref));
-        }
-        return arr;
-      }
-
-      case 0xD: { // dict
-        if (size === 0x0F) { size = this.parseExtendedSize(pos); pos += this.extendedBytes; }
-        const dict = {};
-        const keysStart = pos;
-        const valsStart = pos + size * this.objectRefSize;
-        for (let i = 0; i < size; i++) {
-          const keyRef = this.readSizedInt(keysStart + i * this.objectRefSize, this.objectRefSize);
-          const valRef = this.readSizedInt(valsStart + i * this.objectRefSize, this.objectRefSize);
-          const key = this.parseObject(keyRef);
-          const val = this.parseObject(valRef);
-          dict[key] = val;
-        }
-        return dict;
-      }
-
-      default:
-        return null;
-    }
-  }
-
-  parseExtendedSize(pos) {
-    const marker2 = this.bytes[pos];
-    const sizeType = (marker2 & 0xF0) >> 4;
-    const sizeSize = 1 << (marker2 & 0x0F);
-    let val = 0;
-    for (let i = 0; i < sizeSize; i++) {
-      val = val * 256 + this.bytes[pos + 1 + i];
-    }
-    this.extendedBytes = 1 + sizeSize;
-    return val;
-  }
-}
-
-// --- NSKeyedArchiver Decoder (with cycle detection) ---
-function decodeNSKeyedArchiver(plist) {
-  const objects = plist['$objects'];
-  if (!objects) throw new Error('Not an NSKeyedArchiver');
-
-  // Cache resolved objects and track in-progress resolutions to break cycles
-  const resolved = new Map();
-  const inProgress = new Set();
-
-  function getClassName(obj) {
-    if (!obj || !obj['$class']) return '';
-    const classRef = obj['$class'];
-    const classIdx = classRef?.UID ?? classRef;
-    if (typeof classIdx === 'number' && classIdx < objects.length) {
-      const classObj = objects[classIdx];
-      return classObj?.['$classname'] || '';
-    }
-    return '';
-  }
-
-  function resolveUID(uid) {
-    if (uid === null || uid === undefined) return null;
-    const index = uid?.UID ?? uid;
-    if (typeof index !== 'number' || index >= objects.length) return null;
-    return resolveObject(index);
-  }
-
-  function resolveObject(index) {
-    if (index >= objects.length) return null;
-    if (resolved.has(index)) return resolved.get(index);
-    if (inProgress.has(index)) return null; // Break cycle
-
-    const obj = objects[index];
-    if (obj === '$null' || obj === null) return null;
-    if (typeof obj === 'string') return obj;
-    if (typeof obj === 'number' || typeof obj === 'boolean') return obj;
-    if (ArrayBuffer.isView(obj)) return obj;
-
-    inProgress.add(index);
-
-    let result;
-    try {
-      if (Array.isArray(obj)) {
-        result = obj.map(item => resolveValue(item));
-      } else if (typeof obj === 'object') {
-        const className = getClassName(obj);
-
-        if (className.includes('Array') || className.includes('Set')) {
-          const items = obj['NS.objects'] || [];
-          result = (Array.isArray(items) ? items : [items]).map(item => resolveValue(item));
-        } else if (className.includes('Data') || className === 'NSMutableData') {
-          result = obj['NS.data'] || null;
-        } else if (className.includes('String')) {
-          result = obj['NS.string'] || '';
-        } else {
-          // Generic dictionary/object
-          result = {};
-          for (const [k, v] of Object.entries(obj)) {
-            if (k === '$class' || k === '$classes') continue;
-            result[k] = resolveValue(v);
-          }
-        }
-      } else {
-        result = obj;
-      }
-    } catch (e) {
-      result = null;
-    }
-
-    inProgress.delete(index);
-    resolved.set(index, result);
-    return result;
-  }
-
-  function resolveValue(val) {
-    if (val === null || val === undefined) return val;
-    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return val;
-    if (ArrayBuffer.isView(val)) return val;
-    if (val && typeof val === 'object' && 'UID' in val) {
-      return resolveUID(val);
-    }
-    if (Array.isArray(val)) return val.map(item => resolveValue(item));
-    // Don't deep-resolve plain objects to avoid recursion — only resolve UIDs
-    return val;
-  }
-
-  const topDict = plist['$top'];
-  const out = {};
-  for (const [k, v] of Object.entries(topDict)) {
-    out[k] = resolveValue(v);
-  }
-  return { resolved: out, objects, resolveObject, resolveUID, getClassName };
-}
-
-
-// --- LZO1X DECOMPRESSOR ---
+// === LZO1X DECOMPRESSOR ===
 function lzo1xDecompress(src, expectedSize) {
-  const maxOutput = expectedSize || src.length * 10;
-  const dst = new Uint8Array(maxOutput);
-  let ip = 0, op = 0;
-  let t, state = 0;
-  const srcLen = src.length;
-
-  // Safety: prevent infinite loops
-  const maxIterations = srcLen * 20;
-  let iterations = 0;
-
-  // Handle first byte
-  if (ip >= srcLen) return dst.subarray(0, 0);
-  
+  const maxOut = expectedSize || src.length * 10;
+  const dst = new Uint8Array(maxOut);
+  let ip = 0, op = 0, t, state = 0;
+  const SL = src.length, maxIter = SL * 20;
+  let iter = 0;
+  if (ip >= SL) return dst.subarray(0, 0);
   if (src[ip] > 17) {
     t = src[ip++] - 17;
-    if (t < 4) {
-      state = t;
-      while (t-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
-    } else {
-      while (t-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
-      state = 0;
-      if (ip >= srcLen) return dst.subarray(0, op);
-      t = src[ip++];
-      if (t < 16) {
-        return dst.subarray(0, op);
-      }
-    }
-  } else {
-    t = src[ip++];
-  }
-
-  for (;ip < srcLen && op < maxOutput;) {
-    if (++iterations > maxIterations) break;
-    
+    if (t < 4) { state = t; while (t-- > 0 && ip < SL && op < maxOut) dst[op++] = src[ip++]; }
+    else { while (t-- > 0 && ip < SL && op < maxOut) dst[op++] = src[ip++]; state = 0; if (ip >= SL) return dst.subarray(0, op); t = src[ip++]; if (t < 16) return dst.subarray(0, op); }
+  } else { t = src[ip++]; }
+  for (; ip < SL && op < maxOut;) {
+    if (++iter > maxIter) break;
     if (t >= 64) {
-      let len = 1 + ((t >> 5) & 0x07) + 1;
-      let dist = 1 + ((t & 0x1F) << 3) + (src[ip++] >> 2);
-      let mpos = op - dist;
-      if (mpos < 0) break;
-      state = src[ip - 1] & 3;
-      while (len-- > 0 && op < maxOutput) dst[op++] = dst[mpos++];
+      let len = 1 + ((t >> 5) & 7) + 1, dist = 1 + ((t & 0x1F) << 3) + (src[ip++] >> 2), mp = op - dist;
+      if (mp < 0) break; state = src[ip - 1] & 3;
+      while (len-- > 0 && op < maxOut) dst[op++] = dst[mp++];
     } else if (t >= 32) {
-      let len = (t & 0x1F);
-      if (len === 0) {
-        while (ip < srcLen && src[ip] === 0) { len += 255; ip++; if (len > maxOutput) break; }
-        if (ip >= srcLen) break;
-        len += 31 + src[ip++];
-      }
-      len += 2;
-      if (ip + 1 >= srcLen) break;
-      let dist = 1 + ((src[ip] >> 2) + (src[ip + 1] << 6));
-      ip += 2;
-      let mpos = op - dist;
-      if (mpos < 0) break;
-      state = src[ip - 2] & 3;
-      while (len-- > 0 && op < maxOutput) dst[op++] = dst[mpos++];
+      let len = t & 0x1F;
+      if (!len) { while (ip < SL && !src[ip]) { len += 255; ip++; if (len > maxOut) break; } if (ip >= SL) break; len += 31 + src[ip++]; }
+      len += 2; if (ip + 1 >= SL) break;
+      let dist = 1 + ((src[ip] >> 2) + (src[ip+1] << 6)); ip += 2;
+      let mp = op - dist; if (mp < 0) break; state = src[ip-2] & 3;
+      while (len-- > 0 && op < maxOut) dst[op++] = dst[mp++];
     } else if (t >= 16) {
-      let dist = (t & 0x08) << 11;
-      let len = t & 0x07;
-      if (len === 0) {
-        while (ip < srcLen && src[ip] === 0) { len += 255; ip++; if (len > maxOutput) break; }
-        if (ip >= srcLen) break;
-        len += 7 + src[ip++];
-      }
-      if (ip + 1 >= srcLen) break;
-      dist += (src[ip] >> 2) + (src[ip + 1] << 6);
-      ip += 2;
-      if (dist === 0) return dst.subarray(0, op); // end marker
-      dist += 0x4000;
-      let mpos = op - dist;
-      if (mpos < 0) break;
-      state = src[ip - 2] & 3;
-      len += 2;
-      while (len-- > 0 && op < maxOutput) dst[op++] = dst[mpos++];
+      let dist = (t & 8) << 11, len = t & 7;
+      if (!len) { while (ip < SL && !src[ip]) { len += 255; ip++; if (len > maxOut) break; } if (ip >= SL) break; len += 7 + src[ip++]; }
+      if (ip + 1 >= SL) break;
+      dist += (src[ip] >> 2) + (src[ip+1] << 6); ip += 2;
+      if (!dist) return dst.subarray(0, op);
+      dist += 0x4000; let mp = op - dist; if (mp < 0) break; state = src[ip-2] & 3; len += 2;
+      while (len-- > 0 && op < maxOut) dst[op++] = dst[mp++];
     } else {
-      if (state === 0) {
-        let len = (t & 0x0F);
-        if (len === 0) {
-          while (ip < srcLen && src[ip] === 0) { len += 255; ip++; if (len > maxOutput) break; }
-          if (ip >= srcLen) break;
-          len += 15 + src[ip++];
-        }
-        len += 3;
-        while (len-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
-        state = 0;
-        if (ip >= srcLen) break;
-        t = src[ip++];
+      if (!state) {
+        let len = t & 0xF;
+        if (!len) { while (ip < SL && !src[ip]) { len += 255; ip++; if (len > maxOut) break; } if (ip >= SL) break; len += 15 + src[ip++]; }
+        len += 3; while (len-- > 0 && ip < SL && op < maxOut) dst[op++] = src[ip++];
+        state = 0; if (ip >= SL) break; t = src[ip++];
         if (t < 16) {
-          let dist2 = 1 + 0x0800 + (t >> 2) + (src[ip++] << 2);
-          let mpos2 = op - dist2;
-          if (mpos2 < 0 || ip >= srcLen) break;
-          state = src[ip - 1] & 3;
-          if (op + 3 <= maxOutput) {
-            dst[op++] = dst[mpos2++];
-            dst[op++] = dst[mpos2++];
-            dst[op++] = dst[mpos2++];
-          }
-          let st = state;
-          while (st-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
-          if (ip >= srcLen) break;
-          state = src[ip - 1] & 3;
-          if (state > 0) { t = src[ip++]; continue; }
-          if (ip >= srcLen) break;
-          t = src[ip++];
-          continue;
+          let d = 1 + 0x800 + (t >> 2) + (src[ip++] << 2), m = op - d;
+          if (m < 0 || ip >= SL) break; state = src[ip-1] & 3;
+          if (op+3<=maxOut){dst[op++]=dst[m++];dst[op++]=dst[m++];dst[op++]=dst[m++];}
+          let s=state; while(s-->0&&ip<SL&&op<maxOut)dst[op++]=src[ip++];
+          if(ip>=SL)break; state=src[ip-1]&3;
+          if(state>0){t=src[ip++];continue;} if(ip>=SL)break; t=src[ip++]; continue;
         }
         continue;
       } else {
-        if (ip >= srcLen) break;
-        let dist3 = 1 + (t >> 2) + (src[ip++] << 2);
-        let mpos3 = op - dist3;
-        if (mpos3 < 0) break;
-        if (op + 2 <= maxOutput) {
-          dst[op++] = dst[mpos3++];
-          dst[op++] = dst[mpos3++];
-        }
-        state = src[ip - 1] & 3;
+        if(ip>=SL)break; let d=1+(t>>2)+(src[ip++]<<2),m=op-d; if(m<0)break;
+        if(op+2<=maxOut){dst[op++]=dst[m++];dst[op++]=dst[m++];}
+        state=src[ip-1]&3;
       }
     }
-    
-    // Copy literal run based on state
-    if (state > 0) {
-      let st = state;
-      while (st-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
-      state = 0;
-    }
-    
-    if (ip >= srcLen) break;
-    t = src[ip++];
-    if (t < 16) {
-      if (ip >= srcLen) break;
-      let dist4 = 1 + (t >> 2) + (src[ip++] << 2);
-      let mpos4 = op - dist4;
-      if (mpos4 < 0) break;
-      if (op + 2 <= maxOutput) {
-        dst[op++] = dst[mpos4++];
-        dst[op++] = dst[mpos4++];
-      }
-      if (ip > 0) state = src[ip - 1] & 3;
-      let st = state;
-      while (st-- > 0 && ip < srcLen && op < maxOutput) dst[op++] = src[ip++];
-      if (ip > 0) state = src[ip - 1] & 3;
-      if (state > 0 && ip < srcLen) { t = src[ip++]; continue; }
-      if (ip >= srcLen) break;
-      t = src[ip++];
-    }
+    if(state>0){let s=state;while(s-->0&&ip<SL&&op<maxOut)dst[op++]=src[ip++];state=0;}
+    if(ip>=SL)break; t=src[ip++];
+    if(t<16){if(ip>=SL)break;let d=1+(t>>2)+(src[ip++]<<2),m=op-d;if(m<0)break;
+      if(op+2<=maxOut){dst[op++]=dst[m++];dst[op++]=dst[m++];}
+      if(ip>0)state=src[ip-1]&3;let s=state;while(s-->0&&ip<SL&&op<maxOut)dst[op++]=src[ip++];
+      if(ip>0)state=src[ip-1]&3;if(state>0&&ip<SL){t=src[ip++];continue;}if(ip>=SL)break;t=src[ip++];}
   }
-  
   return dst.subarray(0, op);
 }
 
-
-// --- PROCREATE FILE PARSER HELPERS ---
-
-function extractLayersFromObjects(objects) {
-  const layerDefs = [];
-  const seenUUIDs = new Set();
-  
-  // Helper: get class name for an object index
-  function getClassNameForIndex(idx) {
-    const obj = objects[idx];
-    if (!obj || typeof obj !== 'object' || !obj['$class']) return '';
-    const classIdx = obj['$class']?.UID ?? obj['$class'];
-    if (typeof classIdx !== 'number' || classIdx >= objects.length) return '';
-    return objects[classIdx]?.['$classname'] || '';
-  }
-  
-  // Helper: resolve an NSArray UID to an array of object indices
-  function resolveArray(ref) {
-    if (!ref) return [];
-    const idx = ref?.UID ?? ref;
-    if (typeof idx !== 'number' || idx >= objects.length) return [];
-    const arrObj = objects[idx];
-    if (!arrObj || typeof arrObj !== 'object') return [];
-    const items = arrObj['NS.objects'] || (Array.isArray(arrObj) ? arrObj : []);
-    if (!Array.isArray(items)) return [];
-    return items.map(item => item?.UID ?? item).filter(x => typeof x === 'number');
-  }
-  
-  // Recursive function: extract layers from a given object index
-  // If it's a SilicaGroup, drill into children; if SilicaLayer, extract it
-  function extractRecursive(idx, depth, groupName) {
-    if (typeof idx !== 'number' || idx >= objects.length) return;
-    const obj = objects[idx];
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) return;
-    
-    const className = getClassNameForIndex(idx);
-    
-    if (className === 'SilicaGroup' || className.includes('Group')) {
-      // It's a group — get its name and drill into children
-      const def = extractLayerFromRaw(obj, objects);
-      const gName = def.name || groupName || 'Group';
-      console.log(`[Procreate Studio] ${'  '.repeat(depth)}Group: "${gName}" (children...)`);
-      
-      // Find children array
-      const childrenRef = obj.children || obj['NS.objects'];
-      const childIndices = resolveArray(childrenRef);
-      
-      if (childIndices.length > 0) {
-        for (const childIdx of childIndices) {
-          extractRecursive(childIdx, depth + 1, gName);
-        }
-      } else {
-        // Group has no children but might have its own UUID with chunk data
-        // (Procreate flattens single-layer groups sometimes)
-        if (def.uuid && !seenUUIDs.has(def.uuid)) {
-          def.name = gName;
-          def.isGroup = true;
-          seenUUIDs.add(def.uuid);
-          layerDefs.push(def);
-          console.log(`[Procreate Studio] ${'  '.repeat(depth)}  → Group has UUID, adding as layer: "${gName}"`);
-        }
-      }
-    } else if (className === 'SilicaLayer' || className.includes('Layer')) {
-      // It's a regular layer — extract it
-      const def = extractLayerFromRaw(obj, objects);
-      if (def.uuid && !seenUUIDs.has(def.uuid)) {
-        seenUUIDs.add(def.uuid);
-        layerDefs.push(def);
-      } else if (def.uuid) {
-        // Duplicate UUID — still add with a suffix
-        layerDefs.push(def);
-      } else {
-        layerDefs.push(def);
-      }
-      console.log(`[Procreate Studio] ${'  '.repeat(depth)}Layer: "${def.name}" uuid=${def.uuid?.substring(0,12) || '(none)'}...`);
-    } else {
-      // Unknown class — could be a layer, try to extract
-      if (obj.UUID || obj.uuid) {
-        const def = extractLayerFromRaw(obj, objects);
-        if (def.uuid) {
-          // Check if it has children (might be a group-like thing)
-          const childrenRef = obj.children || obj['NS.objects'];
-          const childIndices = resolveArray(childrenRef);
-          if (childIndices.length > 0) {
-            for (const childIdx of childIndices) {
-              extractRecursive(childIdx, depth + 1, def.name);
-            }
-          } else if (!seenUUIDs.has(def.uuid)) {
-            seenUUIDs.add(def.uuid);
-            layerDefs.push(def);
-            console.log(`[Procreate Studio] ${'  '.repeat(depth)}Unknown(${className}): "${def.name}" uuid=${def.uuid?.substring(0,12)}...`);
-          }
-        }
-      }
+// === ZIP-FIRST LAYER DISCOVERY ===
+function discoverLayersFromZip(zip) {
+  const folders = new Map();
+  zip.forEach((path) => {
+    const m = path.match(/^([^/]+)\/(\d+)~(\d+)\.chunk$/);
+    if (m) {
+      const f = m[1];
+      if (f === 'QuickLook' || f === 'video' || f === 'segments') return;
+      if (!folders.has(f)) folders.set(f, { chunks: [], maxCol: 0, maxRow: 0 });
+      const info = folders.get(f);
+      const col = parseInt(m[2]), row = parseInt(m[3]);
+      info.chunks.push({ col, row, path });
+      info.maxCol = Math.max(info.maxCol, col + 1);
+      info.maxRow = Math.max(info.maxRow, row + 1);
     }
-  }
-  
-  // Step 1: Find the top-level layers array
-  let topLevelIndices = null;
-  for (const obj of objects) {
-    if (!obj || typeof obj !== 'object' || Array.isArray(obj) || ArrayBuffer.isView(obj)) continue;
-    const layerRef = obj['SilicaDocumentArchiveLayers'] || obj.unwrappedLayers || obj.layers;
-    if (layerRef) {
-      topLevelIndices = resolveArray(layerRef);
-      if (topLevelIndices.length > 0) {
-        console.log('[Procreate Studio] Found top-level layers array with', topLevelIndices.length, 'entries');
-        break;
-      }
-    }
-  }
-  
-  // Step 2: Recursively extract from top-level entries
-  if (topLevelIndices && topLevelIndices.length > 0) {
-    for (const idx of topLevelIndices) {
-      extractRecursive(idx, 0, '');
-    }
-  }
-  
-  // Step 3: Fallback — scan all objects for SilicaLayer class directly
-  if (layerDefs.length === 0) {
-    console.log('[Procreate Studio] No layers from recursive extraction, scanning all objects...');
-    for (let i = 0; i < objects.length; i++) {
-      const className = getClassNameForIndex(i);
-      if (className === 'SilicaLayer') {
-        const obj = objects[i];
-        const def = extractLayerFromRaw(obj, objects);
-        if (def.uuid && !seenUUIDs.has(def.uuid)) {
-          seenUUIDs.add(def.uuid);
-          layerDefs.push(def);
-        } else if (!def.uuid) {
-          layerDefs.push(def);
-        }
-      }
-    }
-    console.log('[Procreate Studio] Direct scan found', layerDefs.length, 'SilicaLayer objects');
-  }
-  
-  return layerDefs;
+  });
+  console.log('[PS] Found', folders.size, 'layer folders');
+  for (const [f, info] of folders) console.log('  ' + f.substring(0,16) + '... ' + info.chunks.length + ' chunks');
+  return folders;
 }
 
-function extractLayerFromRaw(obj, objects) {
-  function resolveSimple(val) {
-    if (val && typeof val === 'object' && 'UID' in val) {
-      const ref = objects[val.UID];
-      if (ref === '$null') return null;
-      if (typeof ref === 'string' || typeof ref === 'number' || typeof ref === 'boolean') return ref;
-      if (ref && typeof ref === 'object') {
-        // Handle NSString
-        if (ref['NS.string']) return ref['NS.string'];
-        // Handle NSUUID — stored as NS.uuidbytes (16-byte data)
-        if (ref['NS.uuidbytes'] || ref['NS.data']) {
-          const data = ref['NS.uuidbytes'] || ref['NS.data'];
-          if (data && typeof data === 'object' && 'UID' in data) {
-            const innerData = objects[data.UID];
-            if (innerData instanceof Uint8Array || ArrayBuffer.isView(innerData)) {
-              return bytesToUUID(innerData);
-            }
-          }
-          if (data instanceof Uint8Array || ArrayBuffer.isView(data)) {
-            return bytesToUUID(data);
-          }
-        }
-        // Try to get class name and handle accordingly
-        if (ref['$class']) {
-          const classIdx = ref['$class']?.UID ?? ref['$class'];
-          if (typeof classIdx === 'number' && classIdx < objects.length) {
-            const cls = objects[classIdx];
-            const clsName = cls?.['$classname'] || '';
-            if (clsName.includes('UUID') || clsName.includes('uuid')) {
-              // Try to find bytes
-              for (const [k, v] of Object.entries(ref)) {
-                if (k.startsWith('$')) continue;
-                if (v instanceof Uint8Array || ArrayBuffer.isView(v)) {
-                  return bytesToUUID(v);
-                }
-                if (v && typeof v === 'object' && 'UID' in v) {
-                  const inner = objects[v.UID];
-                  if (inner instanceof Uint8Array || ArrayBuffer.isView(inner)) {
-                    return bytesToUUID(inner);
-                  }
-                }
-              }
-            }
-            if (clsName.includes('String')) {
-              return ref['NS.string'] || '';
-            }
-          }
-        }
-      }
-      return ref;
-    }
-    return val;
-  }
-
-  let uuid = resolveSimple(obj.UUID || obj.uuid);
-  
-  // If uuid resolved to raw bytes (Uint8Array of 16 bytes = UUID), convert to string
-  if (ArrayBuffer.isView(uuid) || uuid instanceof Uint8Array) {
-    if (uuid.length === 16) {
-      uuid = bytesToUUID(uuid);
-    } else {
-      // Might be a string encoded as bytes
-      try { uuid = new TextDecoder().decode(uuid); } catch(e) { uuid = ''; }
-    }
-  }
-  // If uuid is still a non-string object, try to dig out UUID bytes
-  if (uuid && typeof uuid === 'object' && !ArrayBuffer.isView(uuid)) {
-    console.warn('[Procreate Studio] UUID resolved to object, keys:', Object.keys(uuid));
-    let found = false;
-    for (const [k, v] of Object.entries(uuid)) {
-      if (k === '$class') continue;
-      if ((ArrayBuffer.isView(v) || v instanceof Uint8Array) && v.length === 16) {
-        uuid = bytesToUUID(v);
-        found = true;
-        break;
-      }
-      // One more level of UID indirection
-      if (v && typeof v === 'object' && 'UID' in v) {
-        const inner = objects[v.UID];
-        if ((ArrayBuffer.isView(inner) || inner instanceof Uint8Array) && inner.length === 16) {
-          uuid = bytesToUUID(inner);
-          found = true;
-          break;
-        }
-      }
-    }
-    if (!found) uuid = '';
-  }
-  uuid = uuid ? String(uuid).trim() : '';
-  
-  let name = resolveSimple(obj.name || obj.Name);
-  if (name && typeof name === 'object') name = '';
-  if (typeof name !== 'string') name = '';
-  
-  // Debug: log first few UUIDs extracted
-  if (!extractLayerFromRaw._debugCount) extractLayerFromRaw._debugCount = 0;
-  if (extractLayerFromRaw._debugCount < 5) {
-    const rawUUID = obj.UUID || obj.uuid;
-    const rawType = rawUUID ? (rawUUID.UID !== undefined ? `UID(${rawUUID.UID})` : typeof rawUUID) : 'missing';
-    console.log(`[Procreate Studio] UUID extraction #${extractLayerFromRaw._debugCount}: raw=${rawType} → resolved="${uuid.substring(0,20)}${uuid.length > 20 ? '...' : ''}" name="${name || '?'}"`);
-    extractLayerFromRaw._debugCount++;
-  }
-  
-  const opacity = typeof obj.opacity === 'number' ? obj.opacity 
-                : typeof obj.extendedBlend === 'number' ? obj.extendedBlend : 1.0;
-  const blend = typeof obj.blend === 'number' ? obj.blend 
-              : typeof obj.blendMode === 'number' ? obj.blendMode : 0;
-  const hidden = obj.hidden === true || obj.isHidden === true;
-  const clipped = obj.clipped === true;
-
-  return { uuid, name, opacity, blend, hidden, clipped };
-}
-
-// Convert 16 raw bytes to UUID string format
-function bytesToUUID(bytes) {
-  const hex = Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  if (hex.length < 32) return hex;
-  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`.toUpperCase();
-}
-
-async function loadThumbnailFromZip(zip) {
-  // Try multiple possible thumbnail paths
-  const thumbPaths = ['QuickLook/Thumbnail.png', 'QuickLook/thumbnail.png'];
-  
-  for (const path of thumbPaths) {
-    const thumbFile = zip.file(path);
-    if (!thumbFile) continue;
-    
+// === LOAD ONE LAYER FROM CHUNKS ===
+async function loadLayerChunks(zip, chunks, w, h, ts) {
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h;
+  const ctx = canvas.getContext('2d');
+  const expectedSize = ts * ts * 4;
+  let loaded = 0;
+  for (const chunk of chunks) {
     try {
-      const thumbArray = await thumbFile.async('uint8array');
-      console.log('[Procreate Studio] Thumbnail data size:', thumbArray.length, 'bytes');
-      
-      // Method 1: createImageBitmap (most reliable)
-      try {
-        const blob = new Blob([thumbArray], { type: 'image/png' });
-        const bmp = await createImageBitmap(blob);
-        const canvas = document.createElement('canvas');
-        canvas.width = bmp.width;
-        canvas.height = bmp.height;
-        canvas.getContext('2d').drawImage(bmp, 0, 0);
-        console.log('[Procreate Studio] Thumbnail loaded via createImageBitmap:', bmp.width, 'x', bmp.height);
-        return canvas;
-      } catch (e) {
-        console.warn('[Procreate Studio] createImageBitmap failed, trying data URL...');
-      }
-      
-      // Method 2: data URL (fallback)
-      try {
-        let binary = '';
-        for (let i = 0; i < thumbArray.length; i++) binary += String.fromCharCode(thumbArray[i]);
-        const dataUrl = 'data:image/png;base64,' + btoa(binary);
-        const canvas = await loadImageToCanvas(dataUrl);
-        if (canvas) {
-          console.log('[Procreate Studio] Thumbnail loaded via data URL:', canvas.width, 'x', canvas.height);
-          return canvas;
+      const file = zip.file(chunk.path);
+      if (!file) continue;
+      const compressed = await file.async('uint8array');
+      let pixels;
+      try { pixels = lzo1xDecompress(compressed, expectedSize); } catch(e) { pixels = compressed; }
+      if (pixels.length >= expectedSize) {
+        const img = ctx.createImageData(ts, ts);
+        for (let i = 0; i < ts*ts; i++) {
+          const s = i*4, a = pixels[s+3];
+          if (!a) continue;
+          const f = 255/a;
+          img.data[s] = Math.min(255, pixels[s+2]*f);
+          img.data[s+1] = Math.min(255, pixels[s+1]*f);
+          img.data[s+2] = Math.min(255, pixels[s]*f);
+          img.data[s+3] = a;
         }
-      } catch (e) {
-        console.warn('[Procreate Studio] Data URL fallback also failed:', e);
+        ctx.putImageData(img, chunk.col*ts, chunk.row*ts);
+        loaded++;
       }
-    } catch (e) {
-      console.warn('[Procreate Studio] Could not read thumbnail file:', e);
-    }
+    } catch(e) {}
   }
-  
+  return { canvas, loaded };
+}
+
+// === OPTIONAL METADATA FROM PLIST ===
+function tryExtractMetadata(zip) {
+  return new Promise(async (resolve) => {
+    try {
+      const f = zip.file('Document.archive');
+      if (!f) { resolve(null); return; }
+      const bytes = new Uint8Array(await f.async('arraybuffer'));
+      if (String.fromCharCode(...bytes.slice(0,6)) !== 'bplist') { resolve(null); return; }
+      // Extract readable strings from binary
+      const strings = []; let cur = '';
+      for (let i = 0; i < bytes.length; i++) {
+        const b = bytes[i];
+        if (b >= 32 && b < 127) cur += String.fromCharCode(b);
+        else { if (cur.length >= 2) strings.push(cur); cur = ''; }
+      }
+      if (cur.length >= 2) strings.push(cur);
+      // Find dimensions
+      let w = 0, h = 0;
+      for (const s of strings) {
+        const m = s.match(/^\{?\s*(\d{3,})\s*,\s*(\d{3,})\s*\}?$/);
+        if (m) { w = parseInt(m[1]); h = parseInt(m[2]); }
+      }
+      // Collect layer names (heuristic: strings that look like names, not system keys)
+      const sysKeys = new Set(['tileSize','size','UUID','name','opacity','blend','hidden','children',
+        'unwrappedLayers','layers','clipped','extendedBlend','blendMode','version','mask',
+        'contentsRect','contentsRectValid','transform','document','perspectiveBlend',
+        'SilicaDocumentArchiveLayers','SilicaDocumentArchiveWidth','SilicaDocumentArchiveHeight',
+        'SilicaDocumentArchiveDPIKey','SilicaLayer','SilicaGroup','NSMutableArray','NSArray',
+        'NSObject','NSString','NSMutableString','NSUUID','NSData','NSMutableData',
+        'NSKeyedArchiver','NSMutableDictionary','NSDictionary','animationDuration',
+        'SilicaDocumentMigrationVersionKey','SilicaDocumentTrackedTimeKey','videoEnabled',
+        'SilicaDocumentVideoPurgedKey','SilicaDocumentVideoSegmentInfoKey',
+        'flippedHorizontally','flippedVertically','bundledImageID','bundledMaskID',
+        'NSKeyedArchiver','colorProfile','strokeCount','type']);
+      const names = strings.filter(s => 
+        s.length > 0 && s.length < 80 && !s.includes('$') && !s.includes('NS.') && 
+        !s.includes('Silica') && !/^[0-9A-F-]{20,}$/i.test(s) && !sysKeys.has(s) &&
+        !/^[a-z]{1,2}$/.test(s) && !/^\d+$/.test(s) && !s.startsWith('bplist'));
+      console.log('[PS] Plist strings: dims=' + w + 'x' + h + ', names(' + names.length + '):', names.slice(0, 15));
+      resolve({ width: w, height: h, layerNames: names });
+    } catch(e) { resolve(null); }
+  });
+}
+
+// === THUMBNAIL ===
+async function loadThumbnailFromZip(zip) {
+  for (const p of ['QuickLook/Thumbnail.png','QuickLook/thumbnail.png']) {
+    const f = zip.file(p); if (!f) continue;
+    try {
+      const arr = await f.async('uint8array');
+      const blob = new Blob([arr], { type: 'image/png' });
+      const bmp = await createImageBitmap(blob);
+      const c = document.createElement('canvas'); c.width = bmp.width; c.height = bmp.height;
+      c.getContext('2d').drawImage(bmp, 0, 0); return c;
+    } catch(e) {}
+  }
   return null;
 }
 
-async function inferDimensions(zip, layerDefs, ts) {
-  let maxCol = 0, maxRow = 0;
-  
-  // Scan ALL files in the zip for chunk patterns
-  zip.forEach((path, entry) => {
-    const match = path.match(/[^/]+\/(\d+)~(\d+)\.chunk$/);
-    if (match) {
-      maxCol = Math.max(maxCol, parseInt(match[1]) + 1);
-      maxRow = Math.max(maxRow, parseInt(match[2]) + 1);
+// === COMPOSITING ===
+function compositeLayersOnCanvas(target, list) {
+  const ctx = target.getContext('2d'); target.width = canvasWidth; target.height = canvasHeight;
+  if (document.getElementById('showTransparency')?.checked) {
+    for (let y = 0; y < canvasHeight; y += 16) for (let x = 0; x < canvasWidth; x += 16) {
+      ctx.fillStyle = ((x/16+y/16)%2===0) ? '#3a3a3a' : '#2a2a2a'; ctx.fillRect(x,y,16,16);
     }
-  });
-
-  // If no chunks found at all, try to get from thumbnail
-  if (maxCol === 0) {
-    const thumbFile = zip.file('QuickLook/Thumbnail.png');
-    if (thumbFile) {
-      try {
-        const thumbArray = await thumbFile.async('uint8array');
-        const thumbBlob = new Blob([thumbArray], { type: 'image/png' });
-        const bmp = await createImageBitmap(thumbBlob);
-        return { width: bmp.width, height: bmp.height };
-      } catch (e) {
-        console.warn('Could not determine size from thumbnail:', e);
-      }
-    }
-    return { width: 2048, height: 2048 };
+  } else ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+  for (let i = list.length-1; i >= 0; i--) {
+    if (!list[i].canvas) continue;
+    ctx.globalAlpha = list[i].opacity ?? 1;
+    ctx.globalCompositeOperation = getBlendMode(list[i].blend);
+    ctx.drawImage(list[i].canvas, 0, 0);
   }
-
-  return {
-    width: maxCol * ts,
-    height: maxRow * ts
-  };
+  ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+}
+function getBlendMode(b) {
+  return {0:'source-over',1:'multiply',2:'screen',3:'overlay',4:'darken',5:'lighten',
+    6:'color-dodge',7:'color-burn',8:'soft-light',9:'hard-light',10:'difference',
+    11:'exclusion',12:'hue',13:'saturation',14:'color',15:'luminosity'}[b] || 'source-over';
 }
 
-// Discover layer folders from zip that contain .chunk files
-function discoverLayerUUIDs(zip) {
-  const folders = new Set();
-  zip.forEach((path) => {
-    // Match any folder containing .chunk files (but not QuickLook or video)
-    const match = path.match(/^([^/]+)\/.*\.chunk$/);
-    if (match) {
-      const folder = match[1];
-      if (folder !== 'QuickLook' && folder !== 'video' && folder !== 'segments') {
-        folders.add(folder);
-      }
-    }
-  });
-  const result = [...folders];
-  console.log('[Procreate Studio] Discovered', result.length, 'chunk folders:', result.map(f => f.substring(0,12)+'...'));
-  return result;
-}
-
-
-// --- LAYER LOADER ---
-async function loadLayer(zip, layerDef, w, h, ts) {
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-  
-  const cols = Math.ceil(w / ts);
-  const rows = Math.ceil(h / ts);
-  const expectedChunkSize = ts * ts * 4; // BGRA
-  
-  let uuid = layerDef.uuid;
-  let chunksLoaded = 0;
-
-  // Try col~row.chunk format first
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const chunkPath = `${uuid}/${col}~${row}.chunk`;
-      const chunkFile = zip.file(chunkPath);
-      
-      if (!chunkFile) continue;
-      
-      try {
-        const compressed = await chunkFile.async('uint8array');
-        let pixels;
-        
-        try {
-          pixels = lzo1xDecompress(compressed, expectedChunkSize);
-        } catch (e) {
-          // Try raw if LZO fails
-          pixels = compressed;
-        }
-        
-        if (pixels.length >= expectedChunkSize) {
-          const imgData = ctx.createImageData(ts, ts);
-          // Convert from premultiplied BGRA to RGBA
-          for (let i = 0; i < ts * ts; i++) {
-            const si = i * 4;
-            const a = pixels[si + 3];
-            if (a === 0) continue;
-            // BGRA → RGBA, un-premultiply
-            const factor = a > 0 ? 255 / a : 0;
-            imgData.data[si + 0] = Math.min(255, pixels[si + 2] * factor); // R (was B)
-            imgData.data[si + 1] = Math.min(255, pixels[si + 1] * factor); // G
-            imgData.data[si + 2] = Math.min(255, pixels[si + 0] * factor); // B (was R)
-            imgData.data[si + 3] = a;
-          }
-          ctx.putImageData(imgData, col * ts, row * ts);
-          chunksLoaded++;
-        }
-      } catch (e) {
-        console.warn(`Failed to load chunk ${chunkPath}:`, e);
-      }
-    }
-  }
-  
-  // If no col~row chunks found, try numbered chunks (old format)
-  if (chunksLoaded === 0) {
-    for (let idx = 0; idx < cols * rows; idx++) {
-      const chunkPath = `${uuid}/${idx}`;
-      const chunkFile = zip.file(chunkPath);
-      if (!chunkFile) continue;
-      
-      try {
-        const compressed = await chunkFile.async('uint8array');
-        let pixels;
-        try {
-          pixels = lzo1xDecompress(compressed, expectedChunkSize);
-        } catch (e) {
-          pixels = compressed;
-        }
-        
-        if (pixels.length >= expectedChunkSize) {
-          const row = Math.floor(idx / cols);
-          const col = idx % cols;
-          const imgData = ctx.createImageData(ts, ts);
-          for (let i = 0; i < ts * ts; i++) {
-            const si = i * 4;
-            const a = pixels[si + 3];
-            if (a === 0) continue;
-            const factor = a > 0 ? 255 / a : 0;
-            imgData.data[si + 0] = Math.min(255, pixels[si + 2] * factor);
-            imgData.data[si + 1] = Math.min(255, pixels[si + 1] * factor);
-            imgData.data[si + 2] = Math.min(255, pixels[si + 0] * factor);
-            imgData.data[si + 3] = a;
-          }
-          ctx.putImageData(imgData, col * ts, row * ts);
-          chunksLoaded++;
-        }
-      } catch (e) { /* skip */ }
-    }
-  }
-  
-  return { canvas, chunksLoaded };
-}
-
-
-// --- COMPOSITING ---
-function compositeLayersOnCanvas(targetCanvas, layersToComposite) {
-  const ctx = targetCanvas.getContext('2d');
-  targetCanvas.width = canvasWidth;
-  targetCanvas.height = canvasHeight;
-
-  const showGrid = document.getElementById('showTransparency')?.checked;
-  
-  if (showGrid) {
-    // Draw transparency grid
-    const gridSize = 16;
-    for (let y = 0; y < canvasHeight; y += gridSize) {
-      for (let x = 0; x < canvasWidth; x += gridSize) {
-        const isLight = ((x / gridSize) + (y / gridSize)) % 2 === 0;
-        ctx.fillStyle = isLight ? '#3a3a3a' : '#2a2a2a';
-        ctx.fillRect(x, y, gridSize, gridSize);
-      }
-    }
-  } else {
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-  }
-  
-  // Composite layers from bottom to top
-  for (let i = layersToComposite.length - 1; i >= 0; i--) {
-    const layer = layersToComposite[i];
-    if (!layer.canvas) continue;
-    ctx.globalAlpha = layer.opacity ?? 1;
-    ctx.globalCompositeOperation = getBlendMode(layer.blend);
-    ctx.drawImage(layer.canvas, 0, 0);
-  }
-  
-  ctx.globalAlpha = 1;
-  ctx.globalCompositeOperation = 'source-over';
-}
-
-function getBlendMode(blend) {
-  const modes = {
-    0: 'source-over',      // Normal
-    1: 'multiply',
-    2: 'screen',
-    3: 'overlay',
-    4: 'darken',
-    5: 'lighten',
-    6: 'color-dodge',
-    7: 'color-burn',
-    8: 'soft-light',
-    9: 'hard-light',
-    10: 'difference',
-    11: 'exclusion',
-    12: 'hue',
-    13: 'saturation',
-    14: 'color',
-    15: 'luminosity',
-  };
-  return modes[blend] || 'source-over';
-}
-
-
-// --- COLOR PALETTE EXTRACTION ---
-function extractPalette(canvas, numColors = 25) {
-  if (!canvas || canvas.width === 0 || canvas.height === 0) return [];
-  
+// === PALETTE ===
+function extractPalette(canvas, n=25) {
+  if (!canvas||!canvas.width||!canvas.height) return [];
   try {
-    // Sample at reduced resolution for performance
-    const sampleSize = Math.min(300, canvas.width, canvas.height);
-    const tempCanvas = document.createElement('canvas');
-    tempCanvas.width = sampleSize;
-    tempCanvas.height = sampleSize;
-    const tctx = tempCanvas.getContext('2d');
-    tctx.drawImage(canvas, 0, 0, sampleSize, sampleSize);
-    const data = tctx.getImageData(0, 0, sampleSize, sampleSize).data;
-    
-    // Collect non-transparent pixels (lower threshold to catch semi-transparent)
-    const pixels = [];
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i + 3] < 20) continue; // skip nearly transparent
-      pixels.push([data[i], data[i + 1], data[i + 2]]);
-    }
-    
-    console.log('[Procreate Studio] Palette sampling:', pixels.length, 'opaque pixels from', sampleSize, 'x', sampleSize, 'sample');
-    
-    if (pixels.length === 0) return [];
-    if (pixels.length < numColors) numColors = Math.max(1, pixels.length);
-    
-    // K-means clustering for palette extraction
-    return kMeansColors(pixels, numColors, 15);
-  } catch (e) {
-    console.error('[Procreate Studio] extractPalette error:', e);
-    return [];
-  }
+    const sz=Math.min(300,canvas.width,canvas.height), tmp=document.createElement('canvas');
+    tmp.width=sz; tmp.height=sz; tmp.getContext('2d').drawImage(canvas,0,0,sz,sz);
+    const d=tmp.getContext('2d').getImageData(0,0,sz,sz).data, px=[];
+    for(let i=0;i<d.length;i+=4) if(d[i+3]>=20) px.push([d[i],d[i+1],d[i+2]]);
+    if(!px.length) return []; return kMeans(px, Math.min(n,px.length), 15);
+  } catch(e) { return []; }
 }
-
-function kMeansColors(pixels, k, iterations) {
-  // Initialize centroids with k-means++ style
-  const centroids = [pixels[Math.floor(Math.random() * pixels.length)].slice()];
-  
-  while (centroids.length < k) {
-    const dists = pixels.map(p => {
-      let minD = Infinity;
-      for (const c of centroids) {
-        const d = colorDist(p, c);
-        if (d < minD) minD = d;
-      }
-      return minD;
-    });
-    const totalDist = dists.reduce((a, b) => a + b, 0);
-    let r = Math.random() * totalDist;
-    for (let i = 0; i < dists.length; i++) {
-      r -= dists[i];
-      if (r <= 0) {
-        centroids.push(pixels[i].slice());
-        break;
-      }
-    }
-  }
-  
-  for (let iter = 0; iter < iterations; iter++) {
-    const clusters = Array.from({ length: k }, () => []);
-    
-    // Assign pixels to nearest centroid (sample for performance)
-    const samplePixels = pixels.length > 5000 
-      ? pixels.filter(() => Math.random() < 5000 / pixels.length) 
-      : pixels;
-      
-    for (const p of samplePixels) {
-      let minD = Infinity, minI = 0;
-      for (let i = 0; i < k; i++) {
-        const d = colorDist(p, centroids[i]);
-        if (d < minD) { minD = d; minI = i; }
-      }
-      clusters[minI].push(p);
-    }
-    
-    // Update centroids
-    for (let i = 0; i < k; i++) {
-      if (clusters[i].length === 0) continue;
-      centroids[i] = [
-        Math.round(clusters[i].reduce((s, p) => s + p[0], 0) / clusters[i].length),
-        Math.round(clusters[i].reduce((s, p) => s + p[1], 0) / clusters[i].length),
-        Math.round(clusters[i].reduce((s, p) => s + p[2], 0) / clusters[i].length),
-      ];
-    }
-  }
-  
-  // Sort by luminance
-  centroids.sort((a, b) => (0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2]) - 
-                            (0.299 * b[0] + 0.587 * b[1] + 0.114 * b[2]));
-  
-  return centroids;
+function kMeans(px, k, iter) {
+  const c=[px[Math.floor(Math.random()*px.length)].slice()];
+  while(c.length<k){const ds=px.map(p=>{let m=1e9;for(const x of c){const d=cD(p,x);if(d<m)m=d;}return m;});
+    const t=ds.reduce((a,b)=>a+b,0);let r=Math.random()*t;for(let i=0;i<ds.length;i++){r-=ds[i];if(r<=0){c.push(px[i].slice());break;}}}
+  const sp=px.length>5000?px.filter(()=>Math.random()<5000/px.length):px;
+  for(let it=0;it<iter;it++){const cl=Array.from({length:k},()=>[]);
+    for(const p of sp){let mD=1e9,mI=0;for(let i=0;i<k;i++){const d=cD(p,c[i]);if(d<mD){mD=d;mI=i;}}cl[mI].push(p);}
+    for(let i=0;i<k;i++){const l=cl[i];if(!l.length)continue;c[i]=[Math.round(l.reduce((s,p)=>s+p[0],0)/l.length),Math.round(l.reduce((s,p)=>s+p[1],0)/l.length),Math.round(l.reduce((s,p)=>s+p[2],0)/l.length)];}}
+  c.sort((a,b)=>(0.299*a[0]+0.587*a[1]+0.114*a[2])-(0.299*b[0]+0.587*b[1]+0.114*b[2])); return c;
 }
+function cD(a,b){return(a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2;}
 
-function colorDist(a, b) {
-  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
-}
-
-
-// --- EXPORT FUNCTIONS ---
-function canvasToBlob(canvas, format, quality) {
-  return new Promise(resolve => {
-    if (format === 'tiff') {
-      resolve(generateTIFF(canvas));
-      return;
-    }
-    const mimeTypes = {
-      'png': 'image/png',
-      'jpg': 'image/jpeg',
-      'webp': 'image/webp',
-    };
-    canvas.toBlob(blob => resolve(blob), mimeTypes[format] || 'image/png', quality / 100);
-  });
-}
-
-function generateTIFF(canvas) {
-  const ctx = canvas.getContext('2d');
-  const w = canvas.width, h = canvas.height;
-  const imgData = ctx.getImageData(0, 0, w, h);
-  const pixels = imgData.data;
-  const rgbLen = w * h * 3;
-  
-  // TIFF header + IFD
-  const headerSize = 8;
-  const ifdEntryCount = 12;
-  const ifdSize = 2 + ifdEntryCount * 12 + 4;
-  const dataOffset = headerSize + ifdSize + 20; // extra space for values
-  
-  const totalSize = dataOffset + rgbLen;
-  const buf = new ArrayBuffer(totalSize);
-  const view = new DataView(buf);
-  const bytes = new Uint8Array(buf);
-  let pos = 0;
-  
-  // Header: little-endian
-  view.setUint16(0, 0x4949, false); // II
-  view.setUint16(2, 42, true);
-  view.setUint32(4, 8, true); // offset to first IFD
-  
-  // IFD
-  pos = 8;
-  view.setUint16(pos, ifdEntryCount, true); pos += 2;
-  
-  function writeIFDEntry(tag, type, count, value) {
-    view.setUint16(pos, tag, true); pos += 2;
-    view.setUint16(pos, type, true); pos += 2;
-    view.setUint32(pos, count, true); pos += 4;
-    view.setUint32(pos, value, true); pos += 4;
-  }
-  
-  writeIFDEntry(256, 3, 1, w);                  // ImageWidth
-  writeIFDEntry(257, 3, 1, h);                  // ImageLength
-  writeIFDEntry(258, 3, 3, headerSize + ifdSize); // BitsPerSample (offset)
-  writeIFDEntry(259, 3, 1, 1);                  // Compression: None
-  writeIFDEntry(262, 3, 1, 2);                  // PhotometricInterpretation: RGB
-  writeIFDEntry(273, 4, 1, dataOffset);          // StripOffsets
-  writeIFDEntry(277, 3, 1, 3);                  // SamplesPerPixel
-  writeIFDEntry(278, 3, 1, h);                  // RowsPerStrip
-  writeIFDEntry(279, 4, 1, rgbLen);              // StripByteCounts
-  writeIFDEntry(282, 5, 1, headerSize + ifdSize + 6);  // XResolution
-  writeIFDEntry(283, 5, 1, headerSize + ifdSize + 14); // YResolution
-  writeIFDEntry(296, 3, 1, 2);                  // ResolutionUnit: inch
-  
-  view.setUint32(pos, 0, true); // Next IFD offset (0 = none)
-  
-  // BitsPerSample values: 8, 8, 8
-  pos = headerSize + ifdSize;
-  view.setUint16(pos, 8, true); pos += 2;
-  view.setUint16(pos, 8, true); pos += 2;
-  view.setUint16(pos, 8, true); pos += 2;
-  
-  // XResolution: 72/1
-  view.setUint32(pos, 72, true); pos += 4;
-  view.setUint32(pos, 1, true); pos += 4;
-  // YResolution: 72/1
-  view.setUint32(pos, 72, true); pos += 4;
-  view.setUint32(pos, 1, true); pos += 4;
-  
-  // Pixel data (RGB, no alpha)
-  let pixPos = dataOffset;
-  for (let i = 0; i < w * h; i++) {
-    bytes[pixPos++] = pixels[i * 4];
-    bytes[pixPos++] = pixels[i * 4 + 1];
-    bytes[pixPos++] = pixels[i * 4 + 2];
-  }
-  
-  return new Blob([buf], { type: 'image/tiff' });
-}
-
-
-// --- SWATCH EXPORT ---
-function generateASE(colors) {
-  // Adobe Swatch Exchange format
-  const numColors = colors.length;
-  const chunks = [];
-  
-  // Header: ASEF + version + numBlocks
-  const header = new ArrayBuffer(12);
-  const hv = new DataView(header);
-  hv.setUint8(0, 0x41); hv.setUint8(1, 0x53); hv.setUint8(2, 0x45); hv.setUint8(3, 0x46); // ASEF
-  hv.setUint16(4, 1);    // Major version
-  hv.setUint16(6, 0);    // Minor version
-  hv.setUint32(8, numColors);
-  chunks.push(header);
-  
-  for (let i = 0; i < numColors; i++) {
-    const [r, g, b] = colors[i];
-    const name = `Color ${i + 1}`;
-    const nameChars = name.split('').map(c => c.charCodeAt(0));
-    const nameLen = nameChars.length + 1; // +1 for null terminator
-    
-    // Block: type(2) + blockLength(4) + nameLength(2) + name(nameLen*2) + colorModel(4) + values(12) + type(2)
-    const blockDataLen = 2 + nameLen * 2 + 4 + 12 + 2;
-    const block = new ArrayBuffer(6 + blockDataLen);
-    const bv = new DataView(block);
-    let bp = 0;
-    
-    bv.setUint16(bp, 0x0001); bp += 2;  // Color entry
-    bv.setUint32(bp, blockDataLen); bp += 4;
-    bv.setUint16(bp, nameLen); bp += 2;
-    for (const ch of nameChars) { bv.setUint16(bp, ch); bp += 2; }
-    bv.setUint16(bp, 0); bp += 2; // null terminator
-    
-    // Color model: RGB
-    bv.setUint8(bp, 0x52); bp++; // R
-    bv.setUint8(bp, 0x47); bp++; // G
-    bv.setUint8(bp, 0x42); bp++; // B
-    bv.setUint8(bp, 0x20); bp++; // space
-    
-    bv.setFloat32(bp, r / 255); bp += 4;
-    bv.setFloat32(bp, g / 255); bp += 4;
-    bv.setFloat32(bp, b / 255); bp += 4;
-    
-    bv.setUint16(bp, 2); // Global color type
-    
-    chunks.push(block);
-  }
-  
-  return new Blob(chunks, { type: 'application/octet-stream' });
-}
-
-function generateACT(colors) {
-  // Adobe Color Table: 256 * 3 bytes + 2 bytes count
-  const buf = new ArrayBuffer(772);
-  const bytes = new Uint8Array(buf);
-  
-  for (let i = 0; i < Math.min(colors.length, 256); i++) {
-    bytes[i * 3] = colors[i][0];
-    bytes[i * 3 + 1] = colors[i][1];
-    bytes[i * 3 + 2] = colors[i][2];
-  }
-  
-  // Color count at offset 768
-  const view = new DataView(buf);
-  view.setUint16(768, Math.min(colors.length, 256));
-  view.setUint16(770, 0xFFFF); // transparency index (none)
-  
-  return new Blob([buf], { type: 'application/octet-stream' });
-}
-
-function generateSwatches(colors) {
-  // Procreate .swatches format (JSON in a zip-like wrapper)
-  const swatchData = colors.map((c, i) => ({
-    hue: rgbToHsl(c[0], c[1], c[2])[0],
-    saturation: rgbToHsl(c[0], c[1], c[2])[1],
-    brightness: rgbToHsl(c[0], c[1], c[2])[2],
-    alpha: 1,
-    colorSpace: 0
-  }));
-  
-  const jsonStr = JSON.stringify([{
-    name: 'Extracted Palette',
-    swatches: swatchData
-  }]);
-  
-  return new Blob([jsonStr], { type: 'application/octet-stream' });
-}
-
-function rgbToHsl(r, g, b) {
-  r /= 255; g /= 255; b /= 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h, s, l = (max + min) / 2;
-  if (max === min) { h = s = 0; }
-  else {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    switch (max) {
-      case r: h = ((g - b) / d + (g < b ? 6 : 0)) / 6; break;
-      case g: h = ((b - r) / d + 2) / 6; break;
-      case b: h = ((r - g) / d + 4) / 6; break;
-    }
-  }
-  return [h, s, l];
-}
-
-function rgbToHex(r, g, b) {
-  return '#' + [r, g, b].map(x => x.toString(16).padStart(2, '0')).join('');
-}
-
-
-// --- SAFE IMAGE LOADING ---
-function loadImageToCanvas(url) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        canvas.getContext('2d').drawImage(img, 0, 0);
-        resolve(canvas);
-      } catch (e) {
-        console.warn('Canvas draw failed:', e);
-        resolve(null);
-      }
-    };
-    img.onerror = (e) => {
-      console.warn('Image load failed for URL:', url?.substring(0, 60), e);
-      resolve(null); // resolve null instead of rejecting — prevents Event in catch
-    };
-    img.src = url;
-  });
-}
-
+// === EXPORT HELPERS ===
+function canvasToBlob(c,f,q){return new Promise(r=>{if(f==='tiff'){r(generateTIFF(c));return;}c.toBlob(b=>r(b),{png:'image/png',jpg:'image/jpeg',webp:'image/webp'}[f]||'image/png',q/100);});}
+function generateTIFF(canvas){const ctx=canvas.getContext('2d'),w=canvas.width,h=canvas.height,px=ctx.getImageData(0,0,w,h).data,rl=w*h*3,hs=8,ic=12,is=2+ic*12+4,dO=hs+is+20;
+  const buf=new ArrayBuffer(dO+rl),v=new DataView(buf),b=new Uint8Array(buf);v.setUint16(0,0x4949,false);v.setUint16(2,42,true);v.setUint32(4,8,true);let p=8;v.setUint16(p,ic,true);p+=2;
+  function I(tag,type,cnt,val){v.setUint16(p,tag,true);p+=2;v.setUint16(p,type,true);p+=2;v.setUint32(p,cnt,true);p+=4;v.setUint32(p,val,true);p+=4;}
+  I(256,3,1,w);I(257,3,1,h);I(258,3,3,hs+is);I(259,3,1,1);I(262,3,1,2);I(273,4,1,dO);I(277,3,1,3);I(278,3,1,h);I(279,4,1,rl);I(282,5,1,hs+is+6);I(283,5,1,hs+is+14);I(296,3,1,2);
+  v.setUint32(p,0,true);p=hs+is;v.setUint16(p,8,true);p+=2;v.setUint16(p,8,true);p+=2;v.setUint16(p,8,true);p+=2;
+  v.setUint32(p,72,true);p+=4;v.setUint32(p,1,true);p+=4;v.setUint32(p,72,true);p+=4;v.setUint32(p,1,true);p+=4;
+  let pp=dO;for(let i=0;i<w*h;i++){b[pp++]=px[i*4];b[pp++]=px[i*4+1];b[pp++]=px[i*4+2];}return new Blob([buf],{type:'image/tiff'});}
+function generateASE(colors){const ch=[];const hd=new ArrayBuffer(12);const hv=new DataView(hd);hv.setUint8(0,65);hv.setUint8(1,83);hv.setUint8(2,69);hv.setUint8(3,70);hv.setUint16(4,1);hv.setUint16(6,0);hv.setUint32(8,colors.length);ch.push(hd);
+  for(let i=0;i<colors.length;i++){const[r,g,b]=colors[i];const nm='Color '+(i+1);const nc=nm.split('').map(c=>c.charCodeAt(0));const nl=nc.length+1;const bdl=2+nl*2+4+12+2;const blk=new ArrayBuffer(6+bdl);const bv=new DataView(blk);let bp=0;bv.setUint16(bp,1);bp+=2;bv.setUint32(bp,bdl);bp+=4;bv.setUint16(bp,nl);bp+=2;for(const c of nc){bv.setUint16(bp,c);bp+=2;}bv.setUint16(bp,0);bp+=2;bv.setUint8(bp,82);bp++;bv.setUint8(bp,71);bp++;bv.setUint8(bp,66);bp++;bv.setUint8(bp,32);bp++;bv.setFloat32(bp,r/255);bp+=4;bv.setFloat32(bp,g/255);bp+=4;bv.setFloat32(bp,b/255);bp+=4;bv.setUint16(bp,2);ch.push(blk);}return new Blob(ch,{type:'application/octet-stream'});}
+function generateACT(colors){const buf=new ArrayBuffer(772),b=new Uint8Array(buf);for(let i=0;i<Math.min(colors.length,256);i++){b[i*3]=colors[i][0];b[i*3+1]=colors[i][1];b[i*3+2]=colors[i][2];}new DataView(buf).setUint16(768,Math.min(colors.length,256));new DataView(buf).setUint16(770,0xFFFF);return new Blob([buf],{type:'application/octet-stream'});}
+function generateSwatches(colors){const sd=colors.map(c=>{const h=rgbToHsl(c[0],c[1],c[2]);return{hue:h[0],saturation:h[1],brightness:h[2],alpha:1,colorSpace:0};});return new Blob([JSON.stringify([{name:'Extracted Palette',swatches:sd}])],{type:'application/octet-stream'});}
+function rgbToHsl(r,g,b){r/=255;g/=255;b/=255;const mx=Math.max(r,g,b),mn=Math.min(r,g,b);let h,s,l=(mx+mn)/2;if(mx===mn){h=s=0;}else{const d=mx-mn;s=l>0.5?d/(2-mx-mn):d/(mx+mn);switch(mx){case r:h=((g-b)/d+(g<b?6:0))/6;break;case g:h=((b-r)/d+2)/6;break;case b:h=((r-g)/d+4)/6;break;}}return[h,s,l];}
+function rgbToHex(r,g,b){return'#'+[r,g,b].map(x=>x.toString(16).padStart(2,'0')).join('');}
 
 // ========================================================================
-// UI LOGIC
+// MAIN FILE HANDLER
 // ========================================================================
-
-// --- FILE UPLOAD ---
 const uploadZone = document.getElementById('uploadZone');
 const fileInput = document.getElementById('fileInput');
-
 uploadZone.addEventListener('click', () => fileInput.click());
 uploadZone.addEventListener('dragover', e => { e.preventDefault(); uploadZone.classList.add('dragover'); });
 uploadZone.addEventListener('dragleave', () => uploadZone.classList.remove('dragover'));
-uploadZone.addEventListener('drop', e => {
-  e.preventDefault();
-  uploadZone.classList.remove('dragover');
-  if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
-});
-fileInput.addEventListener('change', e => {
-  if (e.target.files.length > 0) handleFile(e.target.files[0]);
-});
+uploadZone.addEventListener('drop', e => { e.preventDefault(); uploadZone.classList.remove('dragover'); if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', e => { if (e.target.files.length) handleFile(e.target.files[0]); });
 
 async function handleFile(file) {
-  if (!file.name.endsWith('.procreate')) {
-    showToast('Please select a .procreate file');
-    return;
-  }
-
-  // Show workspace
+  if (!file.name.endsWith('.procreate')) { showToast('Please select a .procreate file'); return; }
   document.getElementById('workspace').classList.remove('no-file');
   document.getElementById('uploadScreen').classList.add('hidden');
   document.getElementById('layerPanel').classList.remove('hidden');
@@ -2093,278 +1077,87 @@ async function handleFile(file) {
   document.getElementById('fileInfo').classList.remove('hidden');
   document.getElementById('btnNewFile').classList.remove('hidden');
   document.getElementById('fileInfo').textContent = file.name;
-  
   showLoading('Reading file...');
-  
+
   try {
     const arrayBuffer = await file.arrayBuffer();
-    console.log('[Procreate Studio] File size:', arrayBuffer.byteLength, 'bytes');
+    console.log('[PS] File:', (arrayBuffer.byteLength/1024/1024).toFixed(1), 'MB');
     setProgress(10);
-    
-    // Step 1: Open as ZIP
-    setLoadingText('Opening ZIP archive...');
+
+    // STEP 1: Open ZIP
     const zip = await JSZip.loadAsync(arrayBuffer);
-    
-    // Log file structure
-    const zipFiles = [];
-    zip.forEach((path) => zipFiles.push(path));
-    console.log('[Procreate Studio] ZIP contents:', zipFiles.length, 'files');
-    console.log('[Procreate Studio] Files:', zipFiles.slice(0, 30).join(', '));
+    let fileList = []; zip.forEach(p => fileList.push(p));
+    console.log('[PS] ZIP entries:', fileList.length);
     setProgress(20);
-    
-    // Step 2: Try to parse Document.archive
-    setLoadingText('Parsing document metadata...');
-    let width = 0, height = 0, ts = 256, layerDefs = [];
-    
-    const archiveFile = zip.file('Document.archive');
-    if (archiveFile) {
-      try {
-        const archiveData = await archiveFile.async('arraybuffer');
-        console.log('[Procreate Studio] Document.archive size:', archiveData.byteLength);
-        const plist = new BPlistParser(archiveData).parse();
-        console.log('[Procreate Studio] Binary plist parsed successfully');
-        
-        const decoder = decodeNSKeyedArchiver(plist);
-        const root = decoder.resolved.root || Object.values(decoder.resolved)[0] || {};
-        const objects = decoder.objects;
-        console.log('[Procreate Studio] NSKeyedArchiver decoded, objects count:', objects.length);
-        
-        // Extract dimensions
-        if (root.size) {
-          if (typeof root.size === 'string') {
-            const m = root.size.match(/\{?\s*(\d+)\s*[,;]\s*(\d+)\s*\}?/);
-            if (m) { width = parseInt(m[1]); height = parseInt(m[2]); }
-          }
-        }
-        if (!width) {
-          for (const obj of objects) {
-            if (obj && typeof obj === 'object' && !Array.isArray(obj) && !ArrayBuffer.isView(obj)) {
-              const w = obj['SilicaDocumentArchiveWidth'] || obj.width || obj.ORKWidth;
-              const h = obj['SilicaDocumentArchiveHeight'] || obj.height || obj.ORKHeight;
-              if (w && h && typeof w === 'number' && typeof h === 'number' && w > 100) {
-                width = w; height = h; break;
-              }
-            }
-          }
-        }
-        if (!width) {
-          for (const obj of objects) {
-            if (typeof obj === 'string') {
-              const m = obj.match(/\{?\s*(\d{3,})\s*,\s*(\d{3,})\s*\}?/);
-              if (m) { width = parseInt(m[1]); height = parseInt(m[2]); break; }
-            }
-          }
-        }
-        
-        // Extract tile size
-        for (const obj of objects) {
-          if (obj && typeof obj === 'object' && !Array.isArray(obj) && !ArrayBuffer.isView(obj)) {
-            const t = obj.tileSize || obj['tileSize'];
-            if (typeof t === 'number' && t > 0 && t <= 1024) { ts = t; break; }
-          }
-        }
-        
-        // Extract layers
-        layerDefs = extractLayersFromObjects(objects);
-        console.log('[Procreate Studio] Found', layerDefs.length, 'layer definitions');
-        layerDefs.forEach((d, i) => console.log(`  Layer ${i}: "${d.name}" uuid=${d.uuid?.substring(0,8)}...`));
-        
-      } catch (archiveErr) {
-        console.warn('[Procreate Studio] Document.archive parse failed:', archiveErr);
+
+    // STEP 2: Discover layers from ZIP folder structure
+    setLoadingText('Discovering layers...');
+    const folderMap = discoverLayersFromZip(zip);
+
+    if (folderMap.size === 0) {
+      const thumb = await loadThumbnailFromZip(zip);
+      if (thumb) {
+        canvasWidth = thumb.width; canvasHeight = thumb.height;
+        layers = [{ name:'Preview', uuid:'', opacity:1, blend:0, hidden:false, canvas:thumb, visible:true, selected:true, chunksLoaded:1, index:0 }];
+        buildLayerList(); renderView(); extractAndShowPalette(); updateStatus(); hideLoading();
+        setTimeout(() => zoomCanvas(0), 50); showToast('No layers found — showing thumbnail'); return;
       }
-    } else {
-      console.warn('[Procreate Studio] No Document.archive found');
-    }
-    
-    setProgress(35);
-    
-    // Step 3: Discover chunk folders from ZIP structure
-    const discoveredFolders = discoverLayerUUIDs(zip);
-    console.log('[Procreate Studio] Discovered chunk folders from ZIP:', discoveredFolders.length, discoveredFolders);
-    
-    // Step 3b: Reconcile layer defs with zip folders
-    if (layerDefs.length === 0 && discoveredFolders.length > 0) {
-      // No layers from archive, create from zip folders
-      layerDefs = discoveredFolders.map((uuid, i) => ({
-        uuid, name: `Layer ${i + 1}`, opacity: 1, blend: 0, hidden: false, clipped: false
-      }));
-    } else if (layerDefs.length > 0) {
-      // Build a case-insensitive lookup of zip folders
-      const folderLookup = new Map();
-      const usedFolders = new Set();
-      for (const f of discoveredFolders) {
-        folderLookup.set(f.toUpperCase(), f);
-      }
-      
-      // Match each layer def's UUID to a zip folder
-      for (const def of layerDefs) {
-        if (def.uuid) {
-          const upper = def.uuid.toUpperCase();
-          // Exact case-insensitive match
-          if (folderLookup.has(upper)) {
-            const matched = folderLookup.get(upper);
-            def.uuid = matched; // Use exact folder name from zip
-            usedFolders.add(matched);
-            continue;
-          }
-          // Try without dashes (some formats differ)
-          const noDash = upper.replace(/-/g, '');
-          for (const [key, val] of folderLookup) {
-            if (key.replace(/-/g, '') === noDash) {
-              def.uuid = val;
-              usedFolders.add(val);
-              break;
-            }
-          }
-        }
-      }
-      
-      // For layers with no UUID, assign remaining unmatched folders in order
-      const unmatchedFolders = discoveredFolders.filter(f => !usedFolders.has(f));
-      let unmatchedIdx = 0;
-      for (const def of layerDefs) {
-        if (!def.uuid || !discoveredFolders.includes(def.uuid)) {
-          if (unmatchedIdx < unmatchedFolders.length) {
-            console.log(`[Procreate Studio] Assigning unmatched folder "${unmatchedFolders[unmatchedIdx]}" to layer "${def.name}"`);
-            def.uuid = unmatchedFolders[unmatchedIdx++];
-          }
-        }
-      }
-      
-      console.log('[Procreate Studio] After reconciliation:');
-      layerDefs.forEach((d, i) => {
-        const inZip = discoveredFolders.includes(d.uuid);
-        console.log(`  Layer ${i}: "${d.name}" uuid=${d.uuid?.substring(0,12)}... inZip=${inZip}`);
-      });
-    }
-    
-    // Step 4: Infer dimensions from chunks if needed
-    if (!width || !height) {
-      const dims = await inferDimensions(zip, layerDefs, ts);
-      width = dims.width;
-      height = dims.height;
-    }
-    
-    canvasWidth = width;
-    canvasHeight = height;
-    tileSize = ts;
-    console.log('[Procreate Studio] Canvas:', canvasWidth, 'x', canvasHeight, 'tileSize:', tileSize);
-    
-    setProgress(40);
-    setLoadingText('Loading layers...');
-    
-    // Step 5: Load each layer's pixel data
-    layers = [];
-    for (let i = 0; i < layerDefs.length; i++) {
-      const def = layerDefs[i];
-      setLoadingText(`Loading layer ${i + 1}/${layerDefs.length}: ${def.name || 'Layer ' + (i+1)}`);
-      setProgress(40 + (45 * (i / layerDefs.length)));
-      
-      let layerCanvas = null;
-      let chunksLoaded = 0;
-      
-      if (def.uuid) {
-        try {
-          const result = await loadLayer(zip, def, canvasWidth, canvasHeight, tileSize);
-          layerCanvas = result.canvas;
-          chunksLoaded = result.chunksLoaded;
-          console.log(`[Procreate Studio] Layer "${def.name}": ${chunksLoaded} chunks loaded`);
-        } catch (e) {
-          console.warn(`[Procreate Studio] Failed to load layer "${def.name}":`, e);
-        }
-      }
-      
-      layers.push({
-        ...def,
-        canvas: layerCanvas,
-        visible: !def.hidden,
-        selected: true,
-        chunksLoaded,
-        index: i
-      });
-    }
-    
-    // Step 6: If no layer data loaded, use thumbnail
-    if (layers.every(l => l.chunksLoaded === 0)) {
-      console.log('[Procreate Studio] No chunk data loaded, trying thumbnail...');
-      const thumbCanvas = await loadThumbnailFromZip(zip);
-      if (thumbCanvas) {
-        canvasWidth = thumbCanvas.width;
-        canvasHeight = thumbCanvas.height;
-        if (layers.length === 0) {
-          layers.push({
-            name: 'Thumbnail Preview',
-            uuid: '', opacity: 1, blend: 0, hidden: false, clipped: false,
-            canvas: thumbCanvas, visible: true, selected: true, chunksLoaded: 1, index: 0
-          });
-        } else {
-          // Assign thumbnail to first layer so we see something
-          layers[0].canvas = thumbCanvas;
-          layers[0].chunksLoaded = 1;
-        }
-        console.log('[Procreate Studio] Thumbnail loaded:', canvasWidth, 'x', canvasHeight);
-      } else {
-        console.warn('[Procreate Studio] No thumbnail available either');
-      }
+      throw new Error('No layer data found');
     }
 
-    setProgress(95);
-    setLoadingText('Rendering...');
+    // STEP 3: Get canvas dimensions
+    setLoadingText('Reading dimensions...');
+    const meta = await tryExtractMetadata(zip);
+    let maxCol = 0, maxRow = 0;
+    for (const [, info] of folderMap) { maxCol = Math.max(maxCol, info.maxCol); maxRow = Math.max(maxRow, info.maxRow); }
     
-    // Build layer list UI
-    buildLayerList();
-    
-    // Render composite
-    renderView();
-    
-    // Fit canvas to viewport
-    setTimeout(() => zoomCanvas(0), 50);
-    
-    // Extract color palette
-    extractAndShowPalette();
-    
-    // Update status
-    updateStatus();
-    
-    setProgress(100);
-    hideLoading();
-    
-    const loadedCount = layers.filter(l => l.chunksLoaded > 0).length;
-    showToast(`Loaded ${layers.length} layers (${loadedCount} with data) — ${canvasWidth}×${canvasHeight}`);
-    
-  } catch (err) {
-    console.error('[Procreate Studio] Fatal error:', err);
-    const errMsg = err?.message || String(err);
-    
-    // Last resort: try just loading thumbnail directly from the file
-    try {
-      const zip2 = await JSZip.loadAsync(await file.arrayBuffer());
-      const thumbCanvas = await loadThumbnailFromZip(zip2);
-      if (thumbCanvas) {
-        canvasWidth = thumbCanvas.width;
-        canvasHeight = thumbCanvas.height;
-        layers = [{
-          name: 'Thumbnail Preview (parse failed)',
-          uuid: '', opacity: 1, blend: 0, hidden: false, clipped: false,
-          canvas: thumbCanvas, visible: true, selected: true, chunksLoaded: 1, index: 0
-        }];
-        buildLayerList();
-        renderView();
-        extractAndShowPalette();
-        updateStatus();
-        hideLoading();
-        showToast('Showing thumbnail — layer parse failed: ' + errMsg);
-        return;
-      }
-    } catch (e2) {
-      console.error('[Procreate Studio] Thumbnail fallback also failed:', e2);
+    if (meta && meta.width > 0 && meta.height > 0) {
+      canvasWidth = meta.width; canvasHeight = meta.height;
+    } else {
+      canvasWidth = maxCol * tileSize; canvasHeight = maxRow * tileSize;
     }
+    if (!canvasWidth || !canvasHeight) { canvasWidth = 2048; canvasHeight = 2048; }
+    console.log('[PS] Canvas:', canvasWidth, 'x', canvasHeight, 'grid:', maxCol, 'x', maxRow);
+    setProgress(30);
+
+    // STEP 4: Try to get layer names from plist
+    const nameList = (meta && meta.layerNames) ? meta.layerNames : [];
     
+    // STEP 5: Load each layer
+    setLoadingText('Loading layers...');
+    layers = [];
+    const entries = [...folderMap.entries()];
+    for (let i = 0; i < entries.length; i++) {
+      const [folder, info] = entries[i];
+      const name = (i < nameList.length) ? nameList[i] : ('Layer ' + (i + 1));
+      setLoadingText(`Loading ${i+1}/${entries.length}: ${name}`);
+      setProgress(30 + 60 * (i / entries.length));
+
+      const result = await loadLayerChunks(zip, info.chunks, canvasWidth, canvasHeight, tileSize);
+      console.log('[PS] Layer "' + name + '": ' + result.loaded + '/' + info.chunks.length + ' chunks');
+
+      layers.push({
+        name, uuid: folder, opacity: 1, blend: 0, hidden: false, clipped: false,
+        canvas: result.canvas, visible: true, selected: true,
+        chunksLoaded: result.loaded, index: i
+      });
+    }
+
+    // STEP 6: Render
+    setProgress(95); setLoadingText('Rendering...');
+    buildLayerList(); renderView();
+    setTimeout(() => zoomCanvas(0), 50);
+    extractAndShowPalette(); updateStatus();
+    setProgress(100); hideLoading();
+    const withData = layers.filter(l => l.chunksLoaded > 0).length;
+    showToast(layers.length + ' layers loaded (' + withData + ' with data) — ' + canvasWidth + '×' + canvasHeight);
+
+  } catch (err) {
+    console.error('[PS] Error:', err);
     hideLoading();
-    showToast('Error: ' + errMsg);
+    showToast('Error: ' + (err?.message || String(err)));
   }
 }
-
 // --- LAYER LIST UI ---
 function buildLayerList() {
   const list = document.getElementById('layerList');
