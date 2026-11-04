@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en" data-mode="dark" data-theme="desert" data-size="m">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{APP_NAME}} — view, edit &amp; compare .procreate files</title>
+<meta name="description" content="{{APP_NAME}} — {{APP_TAGLINE}}. View, edit, compare and convert .procreate artwork in your browser. Nothing is uploaded.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23E0A85A'/%3E%3Cstop offset='.55' stop-color='%23CD774D'/%3E%3Cstop offset='1' stop-color='%23894C29'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='%231b1612'/%3E%3Cpath d='M21.5 9.5c-1.6-1.6-6.4-2-8.6.2-2.6 2.6.2 5 3.6 6.3 3.4 1.3 5.8 3.6 3.2 6.4-2.3 2.3-7.1 1.8-9.2-.3' fill='none' stroke='url(%23g)' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+<style>
+/*{{FONTS}}*/
+/*{{STYLES}}*/
+</style>
+</head>
+<body>
+<div class="page" id="app">
+
+  <!-- ═════════════ Top bar ═════════════ -->
+  <header class="topbar">
+    <a class="brand" href="#" id="brandHome" aria-label="{{APP_NAME}} — back to start">
+      <h1 class="sr">{{APP_NAME}}</h1>
+      <img class="wordmark" src="{{IMG_WORDMARK}}" alt="" width="790" height="176">
+      <p class="etym"><span class="label">From the Greek</span>
+        <span class="phrase"><b>syn</b> <i>together</i> <span class="plus">+</span> <b>optikos</b> <i>of seeing</i></span>
+        <span class="meaning">— seeing all together</span></p>
+    </a>
+    <div class="topbar-actions">
+      <div class="grp size-grp"><span class="label">Size</span>
+        <div class="seg" id="sizeSeg" role="radiogroup" aria-label="Text size"><button data-v="s" role="radio">S</button><button data-v="m" role="radio">M</button><button data-v="l" role="radio">L</button><button data-v="xl" role="radio">XL</button></div>
+      </div>
+      <nav class="seg mode-tabs" role="tablist" aria-label="Mode">
+        <button role="tab" id="tabView" data-mode-tab="view" aria-selected="true" aria-controls="viewMode">Viewer</button>
+        <button role="tab" id="tabCompare" data-mode-tab="compare" aria-selected="false" aria-controls="compareMode">Compare</button>
+      </nav>
+      <button class="btn primary" id="btnOpen" title="Open a .procreate file (O)">
+        <svg viewBox="0 0 24 24"><path d="M12 15V4m0 0-4 4m4-4 4 4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg>Open</button>
+      <button class="iconbtn" id="btnSettings" aria-label="Settings" title="Settings (,)">
+        <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg></button>
+    </div>
+  </header>
+
+  <main>
+  <!-- ═════════════ VIEWER ═════════════ -->
+  <section class="panel mode" id="viewMode" role="tabpanel" aria-labelledby="tabView">
+    <!-- empty state -->
+    <div class="empty-wrap" id="emptyView">
+      <div class="panel-header">
+        <div class="panel-heading"><h2>Artwork</h2><p class="hint">Open a Procreate file to browse, edit, export or compare its layers.</p></div>
+      </div>
+      <div class="empty" id="dropZone" tabindex="0" role="button" aria-label="Choose a .procreate file, or drop one here">
+        <div class="empty-art" aria-hidden="true"><span class="sheet s1"></span><span class="sheet s2"></span><span class="sheet s3"></span><span class="sheet s4"></span></div>
+        <div class="big">No artwork open yet</div>
+        <div class="sm">Click here to <span class="hl">open</span>, or drag &amp; drop a <span class="hl">.procreate</span> file onto this box.</div>
+        <ul class="chips" aria-label="What you can do">
+          <li>Browse every layer</li><li>Reorder · rename · delete</li><li>Save as .procreate</li><li>Compare two files</li><li>PNG · JPG · WebP · TIFF</li><li>Palette → .swatches · .ase</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- workspace -->
+    <div class="workspace" id="workView" hidden>
+      <div class="panel-header">
+        <div class="panel-heading">
+          <h2 id="docTitleH">Artwork</h2>
+          <p class="hint" id="docMeta">—</p>
+          <p class="counts" id="docCounts"></p>
+        </div>
+        <div class="panel-actions">
+          <span class="badge-edit" id="editBadge" hidden title="Your layer edits haven’t been saved as a .procreate file yet"><span class="dot" aria-hidden="true"></span>Unsaved layer edits</span>
+          <button class="btn ghost sm" id="btnClose" title="Close this file">Close file</button>
+          <button class="btn primary" id="btnExportTop" title="All export options (E)" disabled>Export</button>
+        </div>
+      </div>
+
+      <div class="viewbar">
+        <div class="grp"><span class="label">Show</span>
+          <div class="seg" id="showSeg" role="radiogroup" aria-label="What the canvas shows">
+            <button role="radio" data-show="visible" aria-checked="true" title="Every layer with its eye on (1)">Visible layers</button>
+            <button role="radio" data-show="selected" aria-checked="false" title="Only the layers selected in the Layers panel (2)">Selected only</button>
+            <button role="radio" data-show="original" aria-checked="false" title="The flattened image Procreate saved inside the file (3)">Procreate render</button>
+          </div>
+        </div>
+        <div class="grp"><span class="label">Background</span>
+          <button class="switch" id="tgBg" role="switch" aria-checked="false" title="Show the canvas background colour (B)"><span class="sw" id="bgSwatch"></span><span class="knob"></span></button>
+        </div>
+        <div class="grp" id="maskGrp" hidden><span class="label">Mask</span>
+          <button class="switch" id="tgMask" role="switch" aria-checked="true" title="Apply this layer’s mask"><span class="knob"></span></button>
+        </div>
+        <div class="grp push"><span class="label">Zoom</span>
+          <div class="zoomctl">
+            <button class="colpill" id="zoomOut" aria-label="Zoom out" title="Zoom out (−)">−</button>
+            <button class="zoom-val" id="zoomVal" title="Actual size">100%</button>
+            <button class="colpill" id="zoomIn" aria-label="Zoom in" title="Zoom in (+)">+</button>
+            <button class="btn ghost sm" id="zoomFit" title="Fit to the window (0)">Fit</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="work">
+        <section class="stage" id="stage" aria-label="Artwork canvas">
+          <div class="viewport" id="viewport" tabindex="0" aria-label="Canvas. Drag to pan, scroll or pinch to zoom.">
+            <div class="content" id="viewContent"><canvas id="canvas"></canvas></div>
+          </div>
+          <div class="busy" id="busy" hidden><span class="spin"></span><span id="busyText">Rendering…</span></div>
+        </section>
+
+        <!-- Dock: tabbed panels -->
+        <aside class="dock" id="dock" aria-label="Panels">
+          <div class="dock-resize" id="dockResize" role="separator" aria-orientation="vertical" aria-label="Resize panels" tabindex="0"></div>
+          <div class="dock-head">
+            <div class="dock-tabs" role="tablist" aria-label="Panels">
+              <button role="tab" data-panel="layers" aria-selected="true" aria-controls="pLayers" id="tLayers"><svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg><span>Layers</span></button>
+              <button role="tab" data-panel="info" aria-selected="false" aria-controls="pInfo" id="tInfo"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg><span>Details</span></button>
+              <button role="tab" data-panel="palette" aria-selected="false" aria-controls="pPalette" id="tPalette"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.2 0 1.6-.9 1.3-1.8-.4-1.2.4-2.2 1.6-2.2H17a4 4 0 0 0 4-4c0-5-4-10-9-10Z"/><circle cx="7.5" cy="11" r="1.2"/><circle cx="10.5" cy="7.5" r="1.2"/><circle cx="15" cy="8" r="1.2"/></svg><span>Palette</span></button>
+              <button role="tab" data-panel="export" aria-selected="false" aria-controls="pExport" id="tExport"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg><span>Quick export</span></button>
+            </div>
+            <button class="iconbtn xs pin" id="dockPin" aria-label="Dock the panel" title="Dock the panel beside the canvas" hidden><svg viewBox="0 0 24 24"><path d="M9 4h6l-1 6 4 4H6l4-4-1-6ZM12 14v7"/></svg></button>
+            <button class="iconbtn xs" id="dockHide" aria-label="Hide panels" title="Hide panels (\)"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+          </div>
+
+          <div class="dock-body">
+            <!-- Layers -->
+            <section class="dpanel layers-panel" id="pLayers" role="tabpanel" aria-labelledby="tLayers">
+              <div class="lp-head">
+                <h3 class="dh">Layers <span class="count" id="layerCount">0</span></h3>
+                <div class="seg sm icons" id="lpMode" role="radiogroup" aria-label="Layer list style">
+                  <button role="radio" data-v="outline" aria-checked="false" title="Outline — compact list"><svg viewBox="0 0 24 24"><path d="M4 6h16M8 12h12M8 18h12M4 12h.01M4 18h.01"/></svg><span class="sr">Outline</span></button>
+                  <button role="radio" data-v="preview" aria-checked="true" title="Preview — with thumbnails"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="6" rx="1.5"/><rect x="3" y="14" width="6" height="6" rx="1.5"/><path d="M12 7h9M12 17h9"/></svg><span class="sr">Preview</span></button>
+                </div>
+              </div>
+              <div class="sel-bar" id="selBar">
+                <span class="sel-count" id="selCount">Nothing selected</span>
+                <div class="sel-actions">
+                  <button class="link" data-sel="all">All</button><button class="link" data-sel="none">None</button><button class="link" data-sel="visible">Visible</button><button class="link" data-sel="invert">Invert</button><button class="link" id="byNumberBtn" aria-expanded="false">By #</button>
+                </div>
+              </div>
+              <form class="range" id="rangeForm" autocomplete="off" hidden>
+                <label for="rangeInput" class="sr">Select layers by number</label>
+                <input type="text" id="rangeInput" placeholder="e.g. 1-5, 7  (1 = bottom layer)" spellcheck="false">
+                <button class="btn sm" type="submit">Select</button>
+              </form>
+              <p class="range-msg" id="rangeMsg" aria-live="polite"></p>
+              <div class="edit-banner" id="editBanner" hidden>
+                <span id="editSummary">Edited</span>
+                <button class="link" id="btnRevert">Revert all</button>
+              </div>
+              <div class="tree-wrap" id="treeWrap">
+                <ol class="tree" id="layerTree" role="tree" aria-label="Layer stack, top to bottom" aria-multiselectable="true" tabindex="0"></ol>
+                <div class="drop-line" id="dropLine" hidden></div>
+              </div>
+              <div class="load-bar" id="loadBar"><span></span></div>
+              <div class="lp-foot" role="toolbar" aria-label="Layer actions">
+                <button class="iconbtn xs" id="actUndo" title="Undo (⌘Z)" aria-label="Undo" disabled><svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-3"/></svg></button>
+                <button class="iconbtn xs" id="actRedo" title="Redo (⇧⌘Z)" aria-label="Redo" disabled><svg viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0 0 10h3"/></svg></button>
+                <span class="sep"></span>
+                <button class="iconbtn xs" id="actUp" title="Move up (⌥↑)" aria-label="Move selected layers up"><svg viewBox="0 0 24 24"><path d="m6 11 6-6 6 6M12 5v14"/></svg></button>
+                <button class="iconbtn xs" id="actDown" title="Move down (⌥↓)" aria-label="Move selected layers down"><svg viewBox="0 0 24 24"><path d="m6 13 6 6 6-6M12 19V5"/></svg></button>
+                <button class="iconbtn xs" id="actRename" title="Rename (Enter or double-click)" aria-label="Rename"><svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></svg></button>
+                <button class="iconbtn xs" id="actIsolate" title="Show only the selected layers (2)" aria-label="Show selected only"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M3 12s3.5-7 9-7 9 7 9 7-3.5 7-9 7-9-7-9-7Z"/></svg></button>
+                <span class="push"></span>
+                <button class="iconbtn xs danger" id="actDelete" title="Delete selected (⌫)" aria-label="Delete selected layers"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg></button>
+              </div>
+            </section>
+
+            <!-- Details -->
+            <section class="dpanel info-panel" id="pInfo" role="tabpanel" aria-labelledby="tInfo" hidden>
+              <h3 class="dh">On the canvas</h3>
+              <p class="lead" id="viewDesc">—</p>
+              <dl class="facts" id="viewFacts"></dl>
+              <div id="layerInfo" hidden>
+                <h3 class="dh">Selected layer</h3>
+                <dl class="facts" id="layerFacts"></dl>
+              </div>
+              <h3 class="dh">Artwork</h3>
+              <div class="stats">
+                <div class="stat big"><span class="n" id="statLayers">0</span><span class="label">layers</span></div>
+                <div class="stat"><span class="n" id="statSize">—</span><span class="label">pixels</span></div>
+              </div>
+              <dl class="facts" id="facts"></dl>
+            </section>
+
+            <!-- Palette -->
+            <section class="dpanel palette" id="pPalette" role="tabpanel" aria-labelledby="tPalette" hidden>
+              <div class="ph"><h3 class="dh">Palette</h3><span class="small" id="paletteSource">from the canvas</span></div>
+              <div class="pal-controls">
+                <div class="stepper" role="group" aria-label="Number of colours">
+                  <button id="palMinus" aria-label="Fewer colours">−</button><output id="palCount">12</output><button id="palPlus" aria-label="More colours">+</button>
+                </div>
+                <div class="seg sm" role="group" aria-label="Sort colours" id="palSort">
+                  <button data-sort="share" aria-pressed="true">Amount</button><button data-sort="hue" aria-pressed="false">Hue</button><button data-sort="light" aria-pressed="false">Light</button>
+                </div>
+              </div>
+              <div class="strip" id="palStrip" aria-hidden="true"></div>
+              <ul class="swatches" id="swatches"></ul>
+              <p class="small">Click a colour to copy its hex code. Save the palette from <button class="link" data-open-export="palette">Export → Colour palette</button>.</p>
+            </section>
+
+            <!-- Quick export -->
+            <section class="dpanel quick" id="pExport" role="tabpanel" aria-labelledby="tExport" hidden>
+              <h3 class="dh">Quick export</h3>
+              <p class="lead">Exports exactly what the canvas shows: <b id="qxWhat">—</b></p>
+              <div class="qx-preview"><div class="thumbbox" id="qxThumb"><canvas></canvas></div></div>
+              <span class="label">Format</span>
+              <div class="seg block" id="qxFmt" role="radiogroup" aria-label="Format">
+                <button role="radio" data-fmt="png" aria-checked="true">PNG</button><button role="radio" data-fmt="jpg" aria-checked="false">JPG</button><button role="radio" data-fmt="webp" aria-checked="false">WebP</button><button role="radio" data-fmt="tiff" aria-checked="false">TIFF</button>
+              </div>
+              <button class="btn primary block" id="qxImage">Export what you see</button>
+              <div class="qx-sep"></div>
+              <span class="label">Procreate file</span>
+              <p class="small" id="qxPcNote">—</p>
+              <button class="btn block" id="qxProcreate">Save edited .procreate</button>
+              <button class="link qx-more" id="qxMore">All export options…</button>
+            </section>
+          </div>
+        </aside>
+
+        <nav class="rail" id="rail" aria-label="Panels" hidden>
+          <button data-rail="layers" title="Layers" aria-label="Open Layers"><svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg></button>
+          <button data-rail="info" title="Details" aria-label="Open Details"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg></button>
+          <button data-rail="palette" title="Palette" aria-label="Open Palette"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.2 0 1.6-.9 1.3-1.8-.4-1.2.4-2.2 1.6-2.2H17a4 4 0 0 0 4-4c0-5-4-10-9-10Z"/></svg></button>
+          <button data-rail="export" title="Quick export" aria-label="Open Quick export"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></button>
+          <span class="push"></span>
+          <button data-rail="dock" title="Show panels (\)" aria-label="Show panels"><svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg></button>
+        </nav>
+      </div>
+
+      <div class="stagefoot">
+        <span class="sf-left" id="sfLeft">—</span>
+        <div class="single-nav" id="singleNav" hidden>
+          <button class="colpill" id="prevLayer" aria-label="Layer above" title="Layer above (↑)"><svg viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></svg></button>
+          <span class="single-meta"><b id="singleName">—</b> <span id="singleSub"></span></span>
+          <button class="colpill" id="nextLayer" aria-label="Layer below" title="Layer below (↓)"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+        </div>
+        <span class="sf-right" id="sfRight"></span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═════════════ COMPARE ═════════════ -->
+  <section class="panel mode" id="compareMode" role="tabpanel" aria-labelledby="tabCompare" hidden>
+    <div class="panel-header">
+      <div class="panel-heading">
+        <h2>Compare</h2>
+        <p class="hint" id="cmpHint">Load two .procreate files to compare the artwork and every layer.</p>
+        <p class="counts" id="cmpCounts"></p>
+      </div>
+      <div class="panel-actions">
+        <button class="btn ghost sm" id="cmpSwap" title="Swap A and B">Swap A ⇄ B</button>
+        <button class="btn ghost sm" id="cmpClear" title="Remove both files from the comparison">Clear comparison</button>
+        <button class="btn sm" id="cmpFilesBtn" title="Choose or remove the files being compared">Files…</button>
+      </div>
+    </div>
+
+    <div class="viewbar">
+      <div class="grp"><span class="label">View</span>
+        <div class="seg" id="cmpViewSeg" role="radiogroup" aria-label="Comparison view">
+          <button role="radio" data-cv="side" aria-checked="true" title="A and B next to each other, zoomed together (1)">Side by side</button>
+          <button role="radio" data-cv="swipe" aria-checked="false" title="Drag the divider to wipe between A and B (2)">Swipe</button>
+          <button role="radio" data-cv="onion" aria-checked="false" title="B over A, see-through (3)">Onion skin</button>
+          <button role="radio" data-cv="diff" aria-checked="false" title="Highlight the pixels that differ (4)">Difference</button>
+        </div>
+      </div>
+      <div class="grp" id="onionCtl" hidden><span class="label">B opacity</span><input type="range" id="onionOpacity" min="0" max="100" value="50"></div>
+      <div class="grp" id="diffCtl" hidden><span class="label">Sensitivity</span><input type="range" id="diffThresh" min="1" max="64" value="57">
+        <span class="label">Colour</span><div class="swatchpick" id="diffColors" role="radiogroup" aria-label="Highlight colour"></div></div>
+      <div class="grp push"><span class="label">Zoom</span>
+        <div class="zoomctl">
+          <button class="colpill" id="cmpZoomOut" aria-label="Zoom out">−</button>
+          <button class="zoom-val" id="cmpZoomVal">100%</button>
+          <button class="colpill" id="cmpZoomIn" aria-label="Zoom in">+</button>
+          <button class="btn ghost sm" id="cmpZoomFit">Fit</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="work cmp-work" id="cmpWork">
+      <section class="stage cmp-stage" id="cmpStage" aria-label="Comparison canvas">
+        <div class="cmp-views side" id="cmpViews">
+          <div class="viewport cmp-vp" id="cmpVpA" tabindex="0" aria-label="Artwork A"><div class="content"><canvas id="cmpCanA"></canvas><canvas id="cmpCanB2" class="over"></canvas></div><span class="vp-tag">A</span></div>
+          <div class="viewport cmp-vp" id="cmpVpB" tabindex="0" aria-label="Artwork B"><div class="content"><canvas id="cmpCanB"></canvas></div><span class="vp-tag b">B</span></div>
+          <div class="swipe-handle" id="swipeHandle" role="slider" aria-label="Swipe position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50" tabindex="0" hidden><span></span></div>
+          <div class="cmp-empty" id="cmpEmpty">
+            <div class="drop-slot" data-drop="a"><span class="slot-tag">A</span><b>First artwork</b><span class="small">Drop a .procreate here</span><button class="btn sm" data-cmp-open="a">Choose…</button><button class="link" data-cmp-current="a">Use the Viewer’s file</button></div>
+            <div class="drop-slot" data-drop="b"><span class="slot-tag b">B</span><b>Second artwork</b><span class="small">Drop a .procreate here</span><button class="btn sm" data-cmp-open="b">Choose…</button><button class="link" data-cmp-current="b">Use the Viewer’s file</button></div>
+          </div>
+        </div>
+        <div class="busy" id="cmpBusy" hidden><span class="spin"></span><span id="cmpBusyText">Loading…</span></div>
+      </section>
+
+      <aside class="dock cmp-dock" id="cmpDock" aria-label="Differences">
+        <div class="dock-head">
+          <div class="dock-tabs" role="tablist" aria-label="Compare panels">
+            <button role="tab" data-cpanel="layers" aria-selected="true" aria-controls="cpLayers"><svg viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/></svg><span>Layers</span></button>
+            <button role="tab" data-cpanel="artwork" aria-selected="false" aria-controls="cpArtwork"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.01"/></svg><span>Artwork</span></button>
+            <button role="tab" data-cpanel="files" aria-selected="false" aria-controls="cpFiles"><svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6Z"/><path d="M14 3v4h4"/></svg><span>Files</span></button>
+          </div>
+          <button class="iconbtn xs" id="cmpDockHide" aria-label="Hide panel" title="Hide panel (\)"><svg viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+        </div>
+        <div class="dock-body">
+          <section class="dpanel" id="cpLayers" role="tabpanel">
+            <div class="cmp-score" id="cmpScore"></div>
+            <div class="cmp-tools">
+              <label class="field-inline"><span class="label">Sort</span>
+                <select id="cmpSort">
+                  <option value="stack">Stack order</option><option value="name">Name A–Z</option><option value="status">Type of change</option>
+                  <option value="amount">Most changed</option><option value="modified">Last modified</option>
+                </select></label>
+              <label class="check"><input type="checkbox" id="cmpGroup"> Group by type</label>
+            </div>
+            <div class="chipfilter" id="cmpFilter" role="radiogroup" aria-label="Show"></div>
+            <p class="small" id="cmpMatchNote"></p>
+            <ul class="pair-list" id="cmpPairs"></ul>
+          </section>
+          <section class="dpanel" id="cpArtwork" role="tabpanel" hidden>
+            <h3 class="dh">Artwork <span class="small" id="cmpDocChg"></span></h3>
+            <table class="diff-table" id="cmpDocTable"><thead><tr><th></th><th>A</th><th>B</th></tr></thead><tbody></tbody></table>
+          </section>
+          <section class="dpanel" id="cpFiles" role="tabpanel" hidden>
+            <h3 class="dh">Files</h3>
+            <div class="slot" data-slot="a">
+              <span class="slot-tag">A</span>
+              <div class="slot-body"><b class="slot-name" id="cmpNameA">No file</b><span class="small" id="cmpSubA">Choose the first artwork</span></div>
+              <div class="slot-actions"><button class="btn sm" data-cmp-open="a">Choose…</button><button class="btn ghost sm" data-cmp-current="a">Use Viewer file</button><button class="btn ghost sm danger" data-cmp-remove="a">Remove</button></div>
+            </div>
+            <div class="slot" data-slot="b">
+              <span class="slot-tag b">B</span>
+              <div class="slot-body"><b class="slot-name" id="cmpNameB">No file</b><span class="small" id="cmpSubB">Choose the second artwork</span></div>
+              <div class="slot-actions"><button class="btn sm" data-cmp-open="b">Choose…</button><button class="btn ghost sm" data-cmp-current="b">Use Viewer file</button><button class="btn ghost sm danger" data-cmp-remove="b">Remove</button></div>
+            </div>
+            <p class="small">Tip: drop a file on the left or right half of the canvas to load it as A or B. Removing a file frees its memory; the Viewer is not affected.</p>
+          </section>
+        </div>
+      </aside>
+      <nav class="rail" id="cmpRail" hidden><span class="push"></span><button data-rail="dock" title="Show panel (\)" aria-label="Show panel"><svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg></button></nav>
+    </div>
+    <div class="stagefoot"><span class="sf-left" id="cmpLabel">Whole artwork</span><button class="link" id="cmpWhole" hidden>Show the whole artwork</button><span class="sf-right" id="cmpStatus"></span></div>
+  </section>
+  </main>
+
+  <!-- ═════════════ Footer ═════════════ -->
+  <footer class="footer">
+    <div class="links">
+      <a class="pill" href="https://github.com/keimbio/ProcreateStudio/blob/main/CHANGELOG.md" target="_blank" rel="noopener"><span class="ver">v{{VERSION}}</span></a>
+      <a class="pill" href="https://github.com/keimbio/ProcreateStudio" target="_blank" rel="noopener">★ GitHub</a>
+    </div>
+    <p class="tagline">All processing happens locally in your browser. Your files are never uploaded, stored, or transmitted.<br><span class="small">Not affiliated with Savage Interactive. Procreate® is a trademark of Savage Interactive Pty Ltd.</span></p>
+    <p class="credit">Created by Klara Keim, PhD</p>
+    <a href="https://github.com/keimbio" target="_blank" rel="noopener" aria-label="keimbio on GitHub"><img class="logo" src="{{IMG_LOGO}}" alt="Klara Keim logo" width="72" height="72"></a>
+  </footer>
+</div>
+
+<!-- ═════════════ Export modal ═════════════ -->
+<div class="modal" id="exportModal" aria-hidden="true">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card export" role="dialog" aria-modal="true" aria-labelledby="xTitle">
+    <div class="modal-head"><div class="mh"><h3 id="xTitle">Export</h3><p class="hint" id="xSub">—</p></div><button class="btn ghost sm" data-close>Close</button></div>
+    <div class="modal-body">
+      <div class="xsec" id="xsecImage">
+        <h4>Images</h4><p class="hint">Choose which layers go into the image, then the file type.</p>
+        <div class="tilegrid w" id="xWhat" role="radiogroup" aria-label="What to export">
+          <label class="tile"><input type="radio" name="xwhat" value="view" checked><span class="tc"><span class="ti">◉</span><span class="tt">What you see</span><span class="ts" id="xsView">—</span></span></label>
+          <label class="tile"><input type="radio" name="xwhat" value="visible"><span class="tc"><span class="ti">◐</span><span class="tt">Visible, merged</span><span class="ts" id="xsVisible">—</span></span></label>
+          <label class="tile"><input type="radio" name="xwhat" value="selected"><span class="tc"><span class="ti">▣</span><span class="tt">Selected, merged</span><span class="ts" id="xsSel">—</span></span></label>
+          <label class="tile"><input type="radio" name="xwhat" value="separate"><span class="tc"><span class="ti">▦</span><span class="tt">Selected, one each</span><span class="ts" id="xsSep">—</span></span></label>
+          <label class="tile"><input type="radio" name="xwhat" value="every"><span class="tc"><span class="ti">☰</span><span class="tt">Every layer</span><span class="ts" id="xsEvery">—</span></span></label>
+        </div>
+        <div class="xpreview">
+          <div class="thumbbox lg" id="xThumb"><canvas></canvas></div>
+          <div class="xwho"><span class="label" id="xWhoTitle">Included</span><ul id="xWho"></ul></div>
+        </div>
+        <div class="tilegrid f" id="xFmt" role="radiogroup" aria-label="Format">
+          <label class="tile"><input type="radio" name="xfmt" value="png" checked><span class="tc"><span class="ti">PNG</span><span class="tt">PNG</span><span class="ts">lossless · alpha</span></span></label>
+          <label class="tile"><input type="radio" name="xfmt" value="jpg"><span class="tc"><span class="ti">JPG</span><span class="tt">JPEG</span><span class="ts">small · no alpha</span></span></label>
+          <label class="tile"><input type="radio" name="xfmt" value="webp"><span class="tc"><span class="ti">WEB</span><span class="tt">WebP</span><span class="ts">small · alpha</span></span></label>
+          <label class="tile"><input type="radio" name="xfmt" value="tiff"><span class="tc"><span class="ti">TIF</span><span class="tt">TIFF</span><span class="ts">print · alpha</span></span></label>
+          <label class="tile disabled" title="Browsers can’t create HEIC files"><input type="radio" name="xfmt" value="heic" disabled><span class="tc"><span class="ti">HEIC</span><span class="tt">HEIC</span><span class="ts">not in browsers</span></span></label>
+        </div>
+        <div class="optrow">
+          <span class="ifield">Background <span class="seg sm" id="xBg"><button data-v="transparent" aria-pressed="true">Transparent</button><button data-v="doc" aria-pressed="false">Canvas colour</button><button data-v="white" aria-pressed="false">White</button></span></span>
+          <span class="ifield">Size <span class="seg sm" id="xScale"><button data-v="1" aria-pressed="true">100%</button><button data-v="2" aria-pressed="false">50%</button><button data-v="4" aria-pressed="false">25%</button></span></span>
+          <span class="ifield" id="xQualityRow" hidden>Quality <input type="range" id="xQuality" min="40" max="100" value="92"><output id="xQualityOut">92</output></span>
+        </div>
+        <p class="note" id="xNote"></p>
+        <div class="xfoot"><button class="btn primary" id="xDoImage">Export</button></div>
+      </div>
+
+      <div class="xsec" id="xsecProcreate">
+        <h4>Procreate file</h4><p class="hint">Save a <b>new</b> .procreate with your layer edits. The original file is never changed.</p>
+        <ul class="changes" id="pcChanges"></ul>
+        <div class="optrow">
+          <span class="ifield">File name <input type="text" id="pcFileName" spellcheck="false" style="width:240px"></span>
+          <span class="ifield">Artwork title <input type="text" id="pcTitle" spellcheck="false" style="width:200px"></span>
+        </div>
+        <label class="check"><input type="checkbox" id="pcKeepVis" checked> Keep visibility changes (layers hidden here stay hidden in Procreate)</label>
+        <p class="note warn"><b>Beta.</b> Open the new file in Procreate and check it before deleting your original. The time-lapse recording is kept as it was.</p>
+        <div class="xfoot"><button class="btn primary" id="btnSaveProcreate">Save .procreate</button></div>
+      </div>
+
+      <div class="xsec" id="xsecPalette" style="margin-bottom:0">
+        <h4>Colour palette</h4><p class="hint" id="xPalHint">The main colours of what the canvas shows.</p>
+        <div class="xpal"><div class="strip" id="xPalStrip"></div>
+          <div class="stepper" role="group" aria-label="Number of colours"><button id="xPalMinus" aria-label="Fewer colours">−</button><output id="xPalCount">12</output><button id="xPalPlus" aria-label="More colours">+</button></div></div>
+        <div class="tilegrid a">
+          <button class="actiontile" data-pal="swatches"><span class="ti">PC</span><span class="tt">.swatches</span><span class="ts">Procreate</span></button>
+          <button class="actiontile" data-pal="ase"><span class="ti">ASE</span><span class="tt">.ase</span><span class="ts">Illustrator · Photoshop</span></button>
+          <button class="actiontile" data-pal="aco"><span class="ti">ACO</span><span class="tt">.aco</span><span class="ts">Photoshop swatches</span></button>
+          <button class="actiontile" data-pal="act"><span class="ti">ACT</span><span class="tt">.act</span><span class="ts">Colour table</span></button>
+          <button class="actiontile" data-pal="gpl"><span class="ti">GPL</span><span class="tt">.gpl</span><span class="ts">GIMP · Krita</span></button>
+          <button class="actiontile" data-pal="css"><span class="ti">CSS</span><span class="tt">.css</span><span class="ts">custom properties</span></button>
+          <button class="actiontile" data-pal="json"><span class="ti">{ }</span><span class="tt">.json</span><span class="ts">data</span></button>
+          <button class="actiontile" data-pal="png"><span class="ti">IMG</span><span class="tt">.png</span><span class="ts">palette card</span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═════════════ Settings modal ═════════════ -->
+<div class="modal" id="settings" aria-hidden="true">
+  <div class="modal-backdrop" data-close></div>
+  <div class="modal-card narrow" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <div class="modal-head"><div class="mh"><h3 id="setTitle">Settings</h3><p class="hint">Saved in this browser only.</p></div><button class="btn ghost sm" data-close>Close</button></div>
+    <div class="modal-body">
+      <div class="xsec">
+        <h4>Appearance</h4>
+        <div class="set-row"><span>Mode</span><div class="seg sm" id="setMode"><button type="button" data-v="system">System</button><button type="button" data-v="dark">Dark</button><button type="button" data-v="light">Light</button></div></div>
+        <div class="set-row col"><span>Theme<i>Each theme is drawn from one of your reference palettes.</i></span><div class="themes" id="setTheme">
+          <button type="button" data-v="desert" aria-label="Desert Summer"><i style="--c1:#E0A85A;--c2:#CD774D;--c3:#894C29;--c4:#B5AE7D"></i>Desert Summer</button>
+          <button type="button" data-v="retro" aria-label="Retro Warmth"><i style="--c1:#E5B455;--c2:#D86A47;--c3:#9A4330;--c4:#5E8A7A"></i>Retro Warmth</button>
+          <button type="button" data-v="meadow" aria-label="Meadow"><i style="--c1:#EA9A2E;--c2:#AF5031;--c3:#4B5B34;--c4:#7FC7CC"></i>Meadow</button>
+          <button type="button" data-v="candle" aria-label="Candlelight"><i style="--c1:#C48A8E;--c2:#BE6939;--c3:#751F0D;--c4:#9DA026"></i>Candlelight</button>
+          <button type="button" data-v="studio" aria-label="Studio"><i style="--c1:#FFA67A;--c2:#DC7668;--c3:#CF4A4D;--c4:#4E4C5E"></i>Studio</button>
+        </div></div>
+        <div class="set-row"><span>Text size</span><div class="seg sm" id="setSize"><button type="button" data-v="s">S</button><button type="button" data-v="m">M</button><button type="button" data-v="l">L</button><button type="button" data-v="xl">XL</button></div></div>
+      </div>
+      <div class="xsec">
+        <h4>Panels</h4>
+        <div class="set-row"><span>Panel side<i>Where the Layers, Details, Palette and Quick export panels sit.</i></span><div class="seg sm" id="setSide"><button type="button" data-v="left">Left</button><button type="button" data-v="right">Right</button></div></div>
+        <div class="set-row"><span>Layer list<i>Outline is a compact tree; Preview shows thumbnails.</i></span><div class="seg sm" id="setLpMode"><button type="button" data-v="outline">Outline</button><button type="button" data-v="preview">Preview</button></div></div>
+        <div class="set-row"><span>Thumbnail size</span><div class="seg sm" id="setThumb"><button type="button" data-v="s">S</button><button type="button" data-v="m">M</button><button type="button" data-v="l">L</button></div></div>
+        <label class="set-row check"><span>Colour-code groups<i>Give each top-level group its own colour in the layer list.</i></span><input type="checkbox" id="setTint" checked></label>
+        <label class="set-row check"><span>Close pop-out panels when I click the canvas<i>When panels are hidden and opened from the side rail.</i></span><input type="checkbox" id="setAutoClose" checked></label>
+      </div>
+      <div class="xsec">
+        <h4>Canvas</h4>
+        <div class="set-row"><span>Transparency</span><div class="seg sm" id="setChecker"><button type="button" data-v="dark">Dark grid</button><button type="button" data-v="light">Light grid</button><button type="button" data-v="none">Plain</button></div></div>
+        <label class="set-row check"><span>Apply canvas rotation &amp; flips<i>Show the artwork the way it’s turned in Procreate. Also used for exports.</i></span><input type="checkbox" id="setOrient" checked></label>
+        <label class="set-row check"><span>Sharp pixels when zoomed in<i>Crisp pixels above 200 % instead of smoothing.</i></span><input type="checkbox" id="setPixel" checked></label>
+      </div>
+      <div class="xsec" style="margin-bottom:0">
+        <h4>Keyboard</h4>
+        <ul class="keys">
+          <li><kbd>1</kbd>–<kbd>3</kbd> what the canvas shows</li><li><kbd>↑</kbd><kbd>↓</kbd> select layer above / below</li>
+          <li><kbd>⇧</kbd>/<kbd>⌘</kbd>-click multi-select</li><li><kbd>⌥</kbd><kbd>↑</kbd><kbd>↓</kbd> move layers</li>
+          <li><kbd>Enter</kbd> rename · <kbd>⌫</kbd> delete</li><li><kbd>⌘</kbd><kbd>Z</kbd> undo · <kbd>⇧</kbd><kbd>⌘</kbd><kbd>Z</kbd> redo</li>
+          <li><kbd>⌥</kbd>-click eye: solo layer</li><li><kbd>\</kbd> hide panels · <kbd>E</kbd> export</li>
+          <li><kbd>0</kbd> fit · <kbd>+</kbd><kbd>−</kbd> zoom</li><li><kbd>B</kbd> background · <kbd>O</kbd> open</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="drag-veil" id="dragVeil" hidden><div id="dragVeilText">Drop to open</div></div>
+<div class="toast" id="toast" role="status" aria-live="polite"><span id="toastText"></span><button class="toast-act" id="toastAct" hidden></button></div>
+<input type="file" id="fileInput" accept=".procreate" hidden>
+<input type="file" id="cmpFileInput" accept=".procreate" hidden>
+
+<script id="engineSrc" type="text/plain">/*{{ENGINE}}*/</script>
+<script>
+/*{{ENGINE}}*/
+/*{{APP}}*/
+</script>
+</body>
+</html>
